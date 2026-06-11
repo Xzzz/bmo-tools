@@ -1,4 +1,8 @@
-# bmo_backup_restore.pl
+# BMO tools
+
+Utility scripts for BMO (Bugzilla) instance management.
+
+## bmo_backup_restore.pl
 
 Backup and restore data from a BMO/Bugzilla instance via the REST API.
 Useful for preserving a dev/test instance across Docker image rebuilds.
