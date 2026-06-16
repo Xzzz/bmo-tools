@@ -43,6 +43,7 @@ my %opts = (
     restore_password => 'BugRestore123!',
 );
 my @bug_ids;
+my @skip_users;
 
 GetOptions(
     'mode=s'             => \$opts{mode},
@@ -52,6 +53,7 @@ GetOptions(
     'password=s'         => \$opts{password},
     'file=s'             => \$opts{file},
     'bug=i'              => \@bug_ids,
+    'skip-user=s'        => \@skip_users,
     'product=s'          => \$opts{product},
     'limit=i'            => \$opts{limit},
     'full'               => \$opts{full},
@@ -161,18 +163,60 @@ sub backup_products {
 }
 
 sub backup_users {
-    # match=@ matches every address since all emails contain @.
-    my $resp = api_get('user',
-        match            => '@',
-        include_disabled => 1,
-        include_fields   => join(',', qw(
-            id email real_name can_login email_enabled login_denied_text groups
-        )),
-    );
-    my @users = @{$resp->{users} // []};
+    my $auth_email = eval { api_get('whoami')->{login} } // $auth{login} // '';
+
+    # 'groups' is intentionally excluded from include_fields here: some Bugzilla
+    # versions silently return an empty users list when groups is requested via a
+    # match-based search. Group memberships are fetched per-user by ID below.
+    my $resp = eval {
+        api_get('user',
+            match            => '@',
+            include_disabled => 1,
+            include_fields   => join(',', qw(
+                id email real_name can_login email_enabled login_denied_text
+            )),
+        )
+    };
+    warn "  Warning: user search failed: $@" if $@;
+    my @users = @{($resp // {})->{users} // []};
+
+    # If match=@ returned nothing, retry using the authenticated user's email
+    # domain. Covers instances that silently reject a 1-character match string.
+    if (!@users && $auth_email =~ /\@(.+)$/) {
+        my $domain = $1;
+        warn "  Note: '@' search returned no users; retrying with domain '$domain'.\n";
+        my $retry = eval {
+            api_get('user',
+                match            => $domain,
+                include_disabled => 1,
+                include_fields   => join(',', qw(
+                    id email real_name can_login email_enabled login_denied_text
+                )),
+            )
+        };
+        if ($@) {
+            warn "  Warning: domain search also failed: $@";
+        } elsif ($retry) {
+            @users = @{$retry->{users} // []};
+        }
+    }
+
+    warn "  Warning: no users returned — check that your credentials have 'editusers' privilege.\n"
+        unless @users;
+
+    if (@skip_users) {
+        my %skip = map { lc($_) => 1 } @skip_users;
+        @users = grep { !$skip{lc($_->{email} // '')} } @users;
+    }
+
+    # Fetch group memberships per user by ID.
+    for my $u (@users) {
+        my $detail = eval { api_get("user/$u->{id}", include_fields => 'groups') };
+        $u->{groups} = $detail->{users}[0]{groups} // []
+            if $detail && $detail->{users};
+    }
 
     # API keys are only accessible for the authenticated user.
-    my $auth_email = eval { api_get('whoami')->{login} } // $auth{login} // '';
     if ($auth_email) {
         my $key_resp = eval { api_get('user/api_key') };
         if ($key_resp && @{$key_resp->{api_keys} // []}) {
@@ -255,8 +299,17 @@ sub do_restore {
         printf "Restoring %d bug(s)...\n", scalar @bugs;
 
         my %id_map;
+
         for my $bug (@bugs) {
             my $old_id = $bug->{id};
+            my $existing = eval { api_get("bug/bmo-backup-$old_id", include_fields => 'id') };
+            if ($existing && $existing->{bugs} && @{$existing->{bugs}}) {
+                my $new_id = $existing->{bugs}[0]{id};
+                printf "  Bug %d: already restored as bug %d, skipping.\n",
+                    $old_id, $new_id;
+                $id_map{$old_id} = $new_id;
+                next;
+            }
             print "  Bug $old_id: $bug->{summary}\n";
             my $new_id = restore_bug($bug);
             $id_map{$old_id} = $new_id;
@@ -265,15 +318,6 @@ sub do_restore {
 
         print "Fixing up depends_on/blocks relationships...\n";
         fix_relationships(\@bugs, \%id_map);
-
-        print "ID mapping:\n";
-        printf "  %d -> %d\n", $_, $id_map{$_} for sort { $a <=> $b } keys %id_map;
-
-        my $map_file = $opts{file} =~ s/\.json$/_id_map.json/r;
-        open my $mf, '>', $map_file or die "Cannot write $map_file: $!\n";
-        print $mf $json->encode(\%id_map);
-        close $mf;
-        print "ID mapping saved to $map_file\n";
     }
 }
 
@@ -424,6 +468,11 @@ sub restore_users {
             warn "    Warning: could not disable login: $@\n" if $@;
         }
 
+        if (defined $u->{email_enabled} && !$u->{email_enabled}) {
+            eval { api_put("user/$new_id", { email_enabled => JSON->false }) };
+            warn "    Warning: could not disable email notifications: $@\n" if $@;
+        }
+
         # API key values cannot be written back; create fresh ones and print them.
         for my $k (@{$u->{_api_keys} // []}) {
             next if $k->{revoked};
@@ -458,7 +507,7 @@ sub restore_bug {
     # Scalar fields — copy only when non-empty.
     # status/resolution excluded: Bugzilla rejects POST with non-open statuses.
     for my $f (qw(
-        type severity priority op_sys platform url whiteboard alias
+        type severity priority op_sys platform url whiteboard
         assigned_to qa_contact target_milestone deadline
         estimated_time remaining_time
     )) {
@@ -469,6 +518,13 @@ sub restore_bug {
     # Array fields
     $create{keywords} = $bug->{keywords} if $bug->{keywords} && @{$bug->{keywords}};
     $create{cc}       = $bug->{cc}       if $bug->{cc}       && @{$bug->{cc}};
+
+    # Prepend a backup marker alias so future restores can detect this bug without
+    # consulting the ID map file. Original aliases are preserved after the marker.
+    my @orig_aliases = ref $bug->{alias}   ? @{$bug->{alias}}
+                     : $bug->{alias} // '' ? ($bug->{alias})
+                     : ();
+    $create{alias} = ["bmo-backup-$bug->{id}", @orig_aliases];
 
     $create{groups} = [map { ref $_ ? $_->{name} : $_ } @{$bug->{groups}}]
         if $bug->{groups} && @{$bug->{groups}};
@@ -619,6 +675,7 @@ Backup options:
   --groups                 Include groups
   --products               Include products (components, versions, milestones)
   --users                  Include users and their API keys
+  --skip-user=EMAIL        Exclude a user from backup (repeatable)
   --bug=ID                 Specific bug ID to backup (repeatable; combinable with --groups etc.)
   --product=NAME           Backup bugs in this product (combinable with --groups etc.)
   --limit=N                Max bugs per product query (default: 500)
