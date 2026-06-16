@@ -13,7 +13,7 @@ Useful for preserving a dev/test instance across Docker image rebuilds.
 |---|---|
 | **Groups** | Name, description, user regexp, active status |
 | **Products** | Name, description, settings, plus components, versions, and milestones |
-| **Users** | Email, full name, group memberships, login status, API keys (authenticated user only) |
+| **Users** | Email, full name, group memberships, login/email status, API keys (authenticated user only) |
 | **Bugs** | All fields, comments, attachments, flags, custom fields |
 
 ## Installation
@@ -42,6 +42,10 @@ bmo_backup_restore.pl --mode=backup --apikey=KEY --groups --products --users \
 
 # Specific bugs only
 bmo_backup_restore.pl --mode=backup --apikey=KEY --bug=1 --bug=2
+
+# Exclude auto-created accounts from the user backup
+bmo_backup_restore.pl --mode=backup --apikey=KEY --full \
+                      --skip-user=admin@mozilla.bugs
 ```
 
 ### Restore
@@ -55,7 +59,9 @@ bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json \
 ```
 
 Restore is automatic: all sections present in the backup file are applied in
-the correct order (groups → products → users → bugs).
+the correct order (groups → products → users → bugs). Running restore a second
+time on the same instance is safe — existing groups, products, and users are
+skipped, and bugs are detected via their `bmo-backup-{id}` alias.
 
 ## Options
 
@@ -70,6 +76,7 @@ the correct order (groups → products → users → bugs).
 | `--groups` | — | Include groups in backup |
 | `--products` | — | Include products (components, versions, milestones) |
 | `--users` | — | Include users and their API keys |
+| `--skip-user` | — | Exclude a user from backup by email (repeatable) |
 | `--bug` | — | Specific bug ID (repeatable) |
 | `--product` | — | Backup bugs in this product |
 | `--limit` | `500` | Max bugs per product query |
@@ -78,7 +85,8 @@ the correct order (groups → products → users → bugs).
 ## Known limitations
 
 - **Bug IDs, reporter, and timestamps** cannot be preserved (REST API limitation).
-  A `*_id_map.json` file mapping old IDs to new IDs is written alongside the backup.
+  Each restored bug receives a `bmo-backup-{original_id}` alias so it can be
+  identified on subsequent restores without an external mapping file.
 - **API key values** cannot be written back via the REST API. New keys are created
   and their values printed to stdout during restore so you can update your config.
 - **Other users' API keys** are not accessible via the REST API; only the
