@@ -63,11 +63,25 @@ the correct order (groups → products → users → bugs). Running restore a se
 time on the same instance is safe — existing groups, products, and users are
 skipped, and bugs are detected via their `bmo-backup-{id}` alias.
 
+### Remove duplicate bugs
+
+If bugs were restored more than once before the alias-based deduplication was
+introduced, duplicates can be cleaned up with:
+
+```bash
+bmo_backup_restore.pl --mode=deduplicate --apikey=KEY --file=backup.json
+```
+
+A bug is considered a duplicate when it shares the same summary, product,
+component, and description as the canonical copy (the one carrying the
+`bmo-backup-{id}` alias). Duplicates are deleted if `allowbugdeletion` is
+enabled in the Bugzilla configuration, or marked `RESOLVED DUPLICATE` otherwise.
+
 ## Options
 
 | Option | Default | Description |
 |---|---|---|
-| `--mode` | — | `backup` or `restore` (required) |
+| `--mode` | — | `backup`, `restore`, or `deduplicate` (required) |
 | `--url` | `http://localhost:8000` | Bugzilla base URL |
 | `--apikey` | — | API key for authentication |
 | `--login` / `--password` | — | Alternative to `--apikey` |
@@ -81,6 +95,15 @@ skipped, and bugs are detected via their `bmo-backup-{id}` alias.
 | `--product` | — | Backup bugs in this product |
 | `--limit` | `500` | Max bugs per product query |
 | `--restore-password` | `BugRestore123!` | Initial password for restored users |
+
+## Versioning
+
+Backup files include a `version` field matching the script version that created
+them. On restore and deduplicate, the version is checked:
+
+- **Missing version**: treated as 1.0.0, fully compatible.
+- **Higher major version**: restore is aborted (incompatible format).
+- **Higher minor version**: a warning is printed but restore proceeds.
 
 ## Known limitations
 
