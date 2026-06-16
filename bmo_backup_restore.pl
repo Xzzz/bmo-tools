@@ -36,6 +36,8 @@ use HTTP::Request;
 use URI::Escape qw(uri_escape);
 use POSIX qw(strftime);
 
+use constant VERSION => '1.1.0';
+
 my %opts = (
     url              => 'http://localhost:8000',
     file             => 'bugs_backup.json',
@@ -63,7 +65,7 @@ GetOptions(
     'restore-password=s' => \$opts{restore_password},
 ) or usage();
 
-usage() unless ($opts{mode} // '') =~ /^(backup|restore)$/;
+usage() unless ($opts{mode} // '') =~ /^(backup|restore|deduplicate)$/;
 
 if ($opts{full}) {
     $opts{include_groups}   = 1;
@@ -82,12 +84,9 @@ elsif ($opts{login} && $opts{password}) {
     %auth = (login => $opts{login}, password => $opts{password});
 }
 
-if ($opts{mode} eq 'backup') {
-    do_backup();
-}
-else {
-    do_restore();
-}
+if    ($opts{mode} eq 'backup')      { do_backup()      }
+elsif ($opts{mode} eq 'restore')     { do_restore()     }
+else                                  { do_deduplicate() }
 
 # ---------------------------------------------------------------------------
 # Backup
@@ -95,6 +94,7 @@ else {
 
 sub do_backup {
     my $backup = {
+        version    => VERSION,
         created_at => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime),
         base_url   => $opts{url},
     };
@@ -274,10 +274,23 @@ sub get_all_bug_ids {
 # Restore
 # ---------------------------------------------------------------------------
 
+sub _check_backup_version {
+    my ($backup) = @_;
+    my $bv = $backup->{version} // '1.0.0';
+    my ($b_maj, $b_min) = (split /\./, $bv)[0, 1];
+    my ($c_maj, $c_min) = (split /\./, VERSION)[0, 1];
+    die "Backup version $bv is incompatible with this script (v" . VERSION . ").\n"
+        if $b_maj > $c_maj;
+    warn "Warning: backup version $bv is newer than this script (v" . VERSION
+        . "); some data may not be handled correctly.\n"
+        if $b_maj == $c_maj && $b_min > $c_min;
+}
+
 sub do_restore {
     open my $fh, '<', $opts{file} or die "Cannot read $opts{file}: $!\n";
     my $backup = decode_json(do { local $/; <$fh> });
     close $fh;
+    _check_backup_version($backup);
 
     if ($backup->{groups}) {
         printf "Restoring %d group(s)...\n", scalar @{$backup->{groups}};
@@ -609,6 +622,94 @@ sub fix_relationships {
 }
 
 # ---------------------------------------------------------------------------
+# Deduplicate
+# ---------------------------------------------------------------------------
+
+sub do_deduplicate {
+    open my $fh, '<', $opts{file} or die "Cannot read $opts{file}: $!\n";
+    my $backup = decode_json(do { local $/; <$fh> });
+    close $fh;
+    _check_backup_version($backup);
+
+    my @bugs = @{$backup->{bugs} // []};
+    printf "Checking %d bug(s) for duplicates...\n", scalar @bugs;
+
+    for my $bug (@bugs) {
+        my $old_id = $bug->{id};
+
+        # The canonical restored copy carries the bmo-backup-N alias.
+        my $canonical = eval { api_get("bug/bmo-backup-$old_id", include_fields => 'id') };
+        unless ($canonical && $canonical->{bugs} && @{$canonical->{bugs}}) {
+            printf "  Bug %d: not restored yet, skipping.\n", $old_id;
+            next;
+        }
+        my $canonical_id = $canonical->{bugs}[0]{id};
+
+        # Find the original description (first comment of the backed-up bug).
+        my $orig_desc = ($bug->{_comments} && @{$bug->{_comments}})
+            ? $bug->{_comments}[0]{text} : '';
+
+        # Search by summary within the same product/component.
+        my $matches = eval {
+            api_get('bug',
+                product        => $bug->{product},
+                component      => $bug->{component},
+                summary        => $bug->{summary},
+                include_fields => 'id,summary,alias',
+                limit          => 100,
+            )
+        };
+        next unless $matches && $matches->{bugs};
+
+        my @candidates = grep {
+            $_->{id} != $canonical_id
+            && $_->{summary} eq $bug->{summary}
+            && !grep { $_ eq "bmo-backup-$old_id" } @{$_->{alias} // []}
+        } @{$matches->{bugs}};
+
+        # Confirm duplicates by comparing the description.
+        my @dups;
+        for my $c (@candidates) {
+            my $comments = eval {
+                api_get("bug/$c->{id}/comment", include_fields => 'text')
+            };
+            next unless $comments;
+            my $desc = $comments->{bugs}{ $c->{id} }{comments}[0]{text} // '';
+            push @dups, $c if $desc eq $orig_desc;
+        }
+
+        unless (@dups) {
+            printf "  Bug %d -> #%d: no duplicates.\n", $old_id, $canonical_id;
+            next;
+        }
+
+        printf "  Bug %d -> #%d: %d duplicate(s) found.\n",
+            $old_id, $canonical_id, scalar @dups;
+
+        for my $dup (@dups) {
+            printf "    Removing bug #%d... ", $dup->{id};
+            eval { api_delete("bug/$dup->{id}") };
+            if ($@) {
+                eval {
+                    api_put("bug/$dup->{id}", {
+                        status     => 'RESOLVED',
+                        resolution => 'DUPLICATE',
+                        dup_id     => $canonical_id,
+                    })
+                };
+                if ($@) {
+                    warn "failed: $@";
+                } else {
+                    print "marked as RESOLVED DUPLICATE of #$canonical_id.\n";
+                }
+            } else {
+                print "deleted.\n";
+            }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
@@ -647,6 +748,17 @@ sub api_put {
     return decode_json($resp->decoded_content);
 }
 
+sub api_delete {
+    my ($path) = @_;
+    my %params = %auth;
+    my $qs  = join '&', map { uri_escape($_) . '=' . uri_escape($params{$_}) } keys %params;
+    my $req = HTTP::Request->new(DELETE => "$opts{url}/rest/$path?$qs");
+    $req->header('Accept' => 'application/json');
+    my $resp = $ua->request($req);
+    _check($resp, "DELETE $path");
+    return decode_json($resp->decoded_content);
+}
+
 sub _check {
     my ($resp, $label) = @_;
     return if $resp->is_success;
@@ -660,10 +772,10 @@ sub _check {
 
 sub usage {
     die <<'END';
-Usage: bmo_backup_restore.pl --mode=backup|restore [options]
+Usage: bmo_backup_restore.pl --mode=backup|restore|deduplicate [options]
 
 Options:
-  --mode=backup|restore    Required
+  --mode=backup|restore|deduplicate  Required
   --url=URL                Bugzilla base URL  (default: http://localhost:8000)
   --apikey=KEY             API key for authentication
   --login=EMAIL            Login email (alternative to --apikey)
@@ -686,13 +798,19 @@ Restore options:
 Restore is automatic: all sections present in the backup file are restored in order
 (groups → products → users → bugs).
 
+Deduplicate scans the backup file and, for each bug, deletes any copy that shares
+the same summary, product, component, and description but lacks the bmo-backup-N
+alias. Deletion requires allowbugdeletion in Bugzilla config; otherwise the
+duplicate is marked RESOLVED DUPLICATE.
+
 Examples:
-  bmo_backup_restore.pl --mode=backup  --apikey=abc123 --bug=1 --bug=2
-  bmo_backup_restore.pl --mode=backup  --apikey=abc123 --product="TestProduct"
-  bmo_backup_restore.pl --mode=backup  --apikey=abc123 --full
-  bmo_backup_restore.pl --mode=backup  --apikey=abc123 --groups --products --users
-  bmo_backup_restore.pl --mode=restore --apikey=abc123 --file=bugs_backup.json
-  bmo_backup_restore.pl --mode=restore --apikey=abc123 --file=bugs_backup.json \
+  bmo_backup_restore.pl --mode=backup       --apikey=abc123 --bug=1 --bug=2
+  bmo_backup_restore.pl --mode=backup       --apikey=abc123 --product="TestProduct"
+  bmo_backup_restore.pl --mode=backup       --apikey=abc123 --full
+  bmo_backup_restore.pl --mode=backup       --apikey=abc123 --groups --products --users
+  bmo_backup_restore.pl --mode=restore      --apikey=abc123 --file=bugs_backup.json
+  bmo_backup_restore.pl --mode=restore      --apikey=abc123 --file=bugs_backup.json \
                         --restore-password="MyDevPass1"
+  bmo_backup_restore.pl --mode=deduplicate  --apikey=abc123 --file=bugs_backup.json
 END
 }
