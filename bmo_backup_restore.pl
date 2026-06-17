@@ -36,7 +36,7 @@ use HTTP::Request;
 use URI::Escape qw(uri_escape);
 use POSIX qw(strftime);
 
-use constant VERSION => '1.1.0';
+use constant VERSION => '1.2.0';
 
 my %opts = (
     url              => 'http://localhost:8000',
@@ -77,11 +77,13 @@ my $json = JSON->new->utf8->canonical->pretty;
 my $ua   = LWP::UserAgent->new(timeout => 120);
 
 my %auth;
+my @auth_headers;
 if ($opts{apikey}) {
-    %auth = (api_key => $opts{apikey});
+    @auth_headers = ('X-BUGZILLA-API-KEY' => $opts{apikey});
+    %auth = (Bugzilla_api_key => $opts{apikey});
 }
 elsif ($opts{login} && $opts{password}) {
-    %auth = (login => $opts{login}, password => $opts{password});
+    %auth = (Bugzilla_login => $opts{login}, Bugzilla_password => $opts{password});
 }
 
 if    ($opts{mode} eq 'backup')      { do_backup()      }
@@ -163,7 +165,7 @@ sub backup_products {
 }
 
 sub backup_users {
-    my $auth_email = eval { api_get('whoami')->{login} } // $auth{login} // '';
+    my $auth_email = eval { api_get('whoami')->{login} } // $auth{Bugzilla_login} // $opts{login} // '';
 
     # 'groups' is intentionally excluded from include_fields here: some Bugzilla
     # versions silently return an empty users list when groups is requested via a
@@ -303,8 +305,13 @@ sub do_restore {
     }
 
     if ($backup->{users}) {
-        printf "Restoring %d user(s)...\n", scalar @{$backup->{users}};
-        restore_users($backup->{users});
+        my @users = @{$backup->{users}};
+        if (@skip_users) {
+            my %skip = map { lc($_) => 1 } @skip_users;
+            @users = grep { !$skip{lc($_->{email} // '')} } @users;
+        }
+        printf "Restoring %d user(s)...\n", scalar @users;
+        restore_users(\@users);
     }
 
     if ($backup->{bugs}) {
@@ -315,7 +322,7 @@ sub do_restore {
 
         for my $bug (@bugs) {
             my $old_id = $bug->{id};
-            my $existing = eval { api_get("bug/bmo-backup-$old_id", include_fields => 'id') };
+            my $existing = eval { api_get('bug', alias => "bmo-backup-$old_id", include_fields => 'id') };
             if ($existing && $existing->{bugs} && @{$existing->{bugs}}) {
                 my $new_id = $existing->{bugs}[0]{id};
                 printf "  Bug %d: already restored as bug %d, skipping.\n",
@@ -336,8 +343,16 @@ sub do_restore {
 
 sub restore_groups {
     my ($groups) = @_;
+    my $existing = eval { api_get('group', include_fields => 'name') };
+    my %known = map { $_->{name} => 1 }
+        @{($existing && $existing->{groups}) // []};
+
     for my $g (@$groups) {
         print "  Group: $g->{name}\n";
+        if ($known{$g->{name}}) {
+            print "    -> already exists, skipped\n";
+            next;
+        }
         eval {
             api_post('group', {
                 name        => $g->{name},
@@ -347,52 +362,70 @@ sub restore_groups {
             });
             print "    -> created\n";
         };
-        if ($@) {
-            if ($@ =~ /group_already_exists|already exists/i) {
-                print "    -> already exists, skipped\n";
-            }
-            else {
-                warn "    Warning: $@";
-            }
-        }
+        warn "    Warning: $@" if $@;
     }
 }
 
 sub restore_products {
     my ($products) = @_;
+
+    # Fetch all existing products with their components, versions, milestones.
+    my $existing = eval { api_get('product', type => 'all',
+        include_fields => 'name,components.name,versions.name,milestones.name') };
+    $existing //= eval { api_get('product', type => 'accessible',
+        include_fields => 'name,components.name,versions.name,milestones.name') };
+    my %known_products;
+    for my $ep (@{($existing && $existing->{products}) // []}) {
+        $known_products{$ep->{name}} = {
+            components => { map { $_->{name} => 1 } @{$ep->{components} // []} },
+            versions   => { map { $_->{name} => 1 } @{$ep->{versions}   // []} },
+            milestones => { map { $_->{name} => 1 } @{$ep->{milestones} // []} },
+        };
+    }
+
     for my $p (@$products) {
         print "  Product: $p->{name}\n";
 
-        # Use the first active non-default version as the initial version for creation.
-        my ($init_ver) = grep { $_->{name} ne 'unspecified' && $_->{is_active} }
-                         @{$p->{versions} // []};
-        $init_ver //= ($p->{versions} && @{$p->{versions}})
-            ? $p->{versions}[0]
-            : { name => 'unspecified' };
+        my $known = $known_products{$p->{name}};
 
-        my $result = eval {
-            api_post('product', {
-                name            => $p->{name},
-                description     => $p->{description} // '',
-                version         => $init_ver->{name},
-                is_open         => $p->{is_open}         ? JSON->true : JSON->false,
-                has_unconfirmed => $p->{has_unconfirmed} ? JSON->true : JSON->false,
-                ($p->{classification} && $p->{classification} ne 'Unclassified'
-                    ? (classification => $p->{classification}) : ()),
-            });
-        };
-        if ($@) {
-            if ($@ =~ /already exists/i) {
-                print "    -> already exists, skipped\n";
-            }
-            else {
-                warn "    Warning: $@";
-            }
-            next;
+        if ($known) {
+            print "    -> already exists, ensuring components/versions/milestones\n";
         }
-        print "    -> created (id $result->{id})\n";
+        else {
+            # Use the first active non-default version as the initial version for creation.
+            my ($init_ver) = grep { $_->{name} ne 'unspecified' && $_->{is_active} }
+                             @{$p->{versions} // []};
+            $init_ver //= ($p->{versions} && @{$p->{versions}})
+                ? $p->{versions}[0]
+                : { name => 'unspecified' };
+
+            my $result = eval {
+                api_post('product', {
+                    name            => $p->{name},
+                    description     => $p->{description} // '',
+                    version         => $init_ver->{name},
+                    is_open         => $p->{is_open}         ? JSON->true : JSON->false,
+                    has_unconfirmed => $p->{has_unconfirmed} ? JSON->true : JSON->false,
+                    ($p->{classification} && $p->{classification} ne 'Unclassified'
+                        ? (classification => $p->{classification}) : ()),
+                });
+            };
+            if ($@) {
+                warn "    Warning: $@";
+                next;
+            }
+            print "    -> created (id $result->{id})\n";
+
+            # Seed known sub-items so we skip the version/component just created.
+            $known = {
+                components => {},
+                versions   => { $init_ver->{name} => 1 },
+                milestones => { '---' => 1 },
+            };
+        }
 
         for my $c (@{$p->{components} // []}) {
+            next if $known->{components}{$c->{name}};
             eval {
                 api_post('component', {
                     product          => $p->{name},
@@ -411,7 +444,7 @@ sub restore_products {
         }
 
         for my $v (@{$p->{versions} // []}) {
-            next if $v->{name} eq $init_ver->{name};
+            next if $known->{versions}{$v->{name}};
             eval {
                 api_post('version', {
                     product   => $p->{name},
@@ -424,7 +457,7 @@ sub restore_products {
         }
 
         for my $m (@{$p->{milestones} // []}) {
-            next if $m->{name} eq '---';  # default milestone, auto-created with product
+            next if $known->{milestones}{$m->{name}};
             eval {
                 api_post('milestone', {
                     product   => $p->{name},
@@ -441,10 +474,27 @@ sub restore_products {
 
 sub restore_users {
     my ($users) = @_;
+
+    # Fetch known user emails to avoid POST-and-catch-error.
+    my %known_users;
+    for my $u (@$users) {
+        my $resp = eval { api_get('user', match => $u->{email}, include_fields => 'email') };
+        if ($resp && $resp->{users}) {
+            for my $eu (@{$resp->{users}}) {
+                $known_users{lc($eu->{email})} = 1;
+            }
+        }
+    }
+
     for my $u (@$users) {
         print "  User: $u->{email}\n";
 
         my @group_names = map { ref $_ ? $_->{name} : $_ } @{$u->{groups} // []};
+
+        if ($known_users{lc($u->{email})}) {
+            print "    -> already exists, skipped\n";
+            next;
+        }
 
         my $result = eval {
             api_post('user', {
@@ -454,12 +504,7 @@ sub restore_users {
             });
         };
         if ($@) {
-            if ($@ =~ /account_already_exists|already exists/i) {
-                print "    -> already exists, skipped\n";
-            }
-            else {
-                warn "    Warning: $@";
-            }
+            warn "    Warning: $@";
             next;
         }
         my $new_id = $result->{id};
@@ -515,12 +560,15 @@ sub restore_bug {
         summary     => $bug->{summary},
         version     => $bug->{version},
         description => $description,
+        type        => $bug->{type} // 'defect',
     );
+
+    $create{filed_via} = $bug->{filed_via} // 'other';
 
     # Scalar fields — copy only when non-empty.
     # status/resolution excluded: Bugzilla rejects POST with non-open statuses.
     for my $f (qw(
-        type severity priority op_sys platform url whiteboard
+        severity priority op_sys platform url whiteboard
         assigned_to qa_contact target_milestone deadline
         estimated_time remaining_time
     )) {
@@ -532,18 +580,17 @@ sub restore_bug {
     $create{keywords} = $bug->{keywords} if $bug->{keywords} && @{$bug->{keywords}};
     $create{cc}       = $bug->{cc}       if $bug->{cc}       && @{$bug->{cc}};
 
-    # Prepend a backup marker alias so future restores can detect this bug without
-    # consulting the ID map file. Original aliases are preserved after the marker.
     my @orig_aliases = ref $bug->{alias}   ? @{$bug->{alias}}
                      : $bug->{alias} // '' ? ($bug->{alias})
                      : ();
-    $create{alias} = ["bmo-backup-$bug->{id}", @orig_aliases];
+    $create{alias} = "bmo-backup-$bug->{id}";
 
     $create{groups} = [map { ref $_ ? $_->{name} : $_ } @{$bug->{groups}}]
         if $bug->{groups} && @{$bug->{groups}};
 
-    # Custom fields (cf_*)
-    for my $f (grep { /^cf_/ } keys %$bug) {
+    # Custom fields (cf_*), excluding read-only computed fields
+    my %cf_skip = map { $_ => 1 } qw(cf_last_resolved);
+    for my $f (grep { /^cf_/ && !$cf_skip{$_} } keys %$bug) {
         $create{$f} = $bug->{$f}
             if defined $bug->{$f} && $bug->{$f} ne '';
     }
@@ -561,7 +608,8 @@ sub restore_bug {
     }
 
     my $result = api_post('bug', \%create);
-    my $new_id = $result->{id} or die "Bug creation returned no ID\n";
+    my $new_id = $result->{id} // ($result->{ids} ? $result->{ids}[0] : undef)
+        or die "Bug creation returned no ID (response: " . encode_json($result) . ")\n";
 
     # Status/resolution — always applied via PUT; POST rejects non-open statuses.
     my $want_status     = $bug->{status}     // '';
@@ -638,7 +686,7 @@ sub do_deduplicate {
         my $old_id = $bug->{id};
 
         # The canonical restored copy carries the bmo-backup-N alias.
-        my $canonical = eval { api_get("bug/bmo-backup-$old_id", include_fields => 'id') };
+        my $canonical = eval { api_get('bug', alias => "bmo-backup-$old_id", include_fields => 'id') };
         unless ($canonical && $canonical->{bugs} && @{$canonical->{bugs}}) {
             printf "  Bug %d: not restored yet, skipping.\n", $old_id;
             next;
@@ -713,12 +761,20 @@ sub do_deduplicate {
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
+sub _auth_headers {
+    my @h;
+    for (my $i = 0; $i < @auth_headers; $i += 2) {
+        push @h, $auth_headers[$i], $auth_headers[$i + 1];
+    }
+    return @h;
+}
+
 sub api_get {
     my ($path, %params) = @_;
     %params = (%auth, %params);
     my $qs  = join '&', map { uri_escape($_) . '=' . uri_escape($params{$_}) } keys %params;
     my $url = "$opts{url}/rest/$path" . ($qs ? "?$qs" : '');
-    my $resp = $ua->get($url, Accept => 'application/json');
+    my $resp = $ua->get($url, Accept => 'application/json', _auth_headers());
     _check($resp, "GET $path");
     return decode_json($resp->decoded_content);
 }
@@ -730,6 +786,7 @@ sub api_post {
         "$opts{url}/rest/$path",
         Content_Type => 'application/json',
         Accept       => 'application/json',
+        _auth_headers(),
         Content      => encode_json($data),
     );
     _check($resp, "POST $path");
@@ -738,10 +795,15 @@ sub api_post {
 
 sub api_put {
     my ($path, $data) = @_;
-    $data = {%auth, %$data};
-    my $req = HTTP::Request->new(PUT => "$opts{url}/rest/$path");
+    my $qs = join '&', map { uri_escape($_) . '=' . uri_escape($auth{$_}) } keys %auth;
+    my $url = "$opts{url}/rest/$path" . ($qs ? "?$qs" : '');
+    my $req = HTTP::Request->new(PUT => $url);
     $req->header('Content-Type' => 'application/json');
     $req->header('Accept'       => 'application/json');
+    my @hdr = _auth_headers();
+    for (my $i = 0; $i < @hdr; $i += 2) {
+        $req->header($hdr[$i] => $hdr[$i + 1]);
+    }
     $req->content(encode_json($data));
     my $resp = $ua->request($req);
     _check($resp, "PUT $path");
@@ -752,8 +814,12 @@ sub api_delete {
     my ($path) = @_;
     my %params = %auth;
     my $qs  = join '&', map { uri_escape($_) . '=' . uri_escape($params{$_}) } keys %params;
-    my $req = HTTP::Request->new(DELETE => "$opts{url}/rest/$path?$qs");
+    my $req = HTTP::Request->new(DELETE => "$opts{url}/rest/$path" . ($qs ? "?$qs" : ''));
     $req->header('Accept' => 'application/json');
+    my @hdr = _auth_headers();
+    for (my $i = 0; $i < @hdr; $i += 2) {
+        $req->header($hdr[$i] => $hdr[$i + 1]);
+    }
     my $resp = $ua->request($req);
     _check($resp, "DELETE $path");
     return decode_json($resp->decoded_content);
@@ -761,11 +827,18 @@ sub api_delete {
 
 sub _check {
     my ($resp, $label) = @_;
-    return if $resp->is_success;
     my $body = eval { decode_json($resp->decoded_content) };
-    my $msg  = ($body && $body->{message}) ? "$body->{code}: $body->{message}"
-                                           : $resp->status_line;
-    die "$label failed: $msg\n";
+    if (!$resp->is_success || ($body && $body->{error})) {
+        my $msg = ($body && $body->{message}) ? "$body->{code}: $body->{message}"
+                : ($body && $body->{error})   ? "error code $body->{code} (no message)"
+                :                               $resp->status_line;
+        $msg .= "\n  Response: " . $resp->decoded_content;
+        my $req = $resp->request;
+        if ($req && $req->content) {
+            $msg .= "\n  Request payload: " . $req->content;
+        }
+        die "$label failed: $msg\n";
+    }
 }
 
 # ---------------------------------------------------------------------------
