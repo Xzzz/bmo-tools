@@ -61,7 +61,15 @@ bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json \
 Restore is automatic: all sections present in the backup file are applied in
 the correct order (groups → products → users → bugs). Running restore a second
 time on the same instance is safe — existing groups, products, and users are
-skipped, and bugs are detected via their `bmo-backup-{id}` alias.
+detected via upfront queries and skipped. Bugs are detected via their
+`bmo-backup-{id}` alias. Missing components, versions, and milestones are
+created even when the parent product already exists.
+
+```bash
+# Exclude a user from restore (e.g. the admin account)
+bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json \
+                      --skip-user=admin@mozilla.bugs
+```
 
 ### Remove duplicate bugs
 
@@ -90,7 +98,7 @@ enabled in the Bugzilla configuration, or marked `RESOLVED DUPLICATE` otherwise.
 | `--groups` | — | Include groups in backup |
 | `--products` | — | Include products (components, versions, milestones) |
 | `--users` | — | Include users and their API keys |
-| `--skip-user` | — | Exclude a user from backup by email (repeatable) |
+| `--skip-user` | — | Exclude a user from backup/restore by email (repeatable) |
 | `--bug` | — | Specific bug ID (repeatable) |
 | `--product` | — | Backup bugs in this product |
 | `--limit` | `500` | Max bugs per product query |
@@ -105,11 +113,32 @@ them. On restore and deduplicate, the version is checked:
 - **Higher major version**: restore is aborted (incompatible format).
 - **Higher minor version**: a warning is printed but restore proceeds.
 
+## Authentication
+
+Two methods are supported:
+
+- **API key** (recommended): `--apikey=KEY` — sent via `X-BUGZILLA-API-KEY`
+  header.
+- **Login/password**: `--login=EMAIL --password=PASS` — sent as
+  `Bugzilla_login`/`Bugzilla_password` parameters to avoid collisions with
+  data fields in API payloads.
+
+## Error diagnostics
+
+When an API call fails, the error message includes both the full response body
+and the request payload, making it easier to identify which field is causing
+the issue.
+
 ## Known limitations
 
 - **Bug IDs, reporter, and timestamps** cannot be preserved (REST API limitation).
   Each restored bug receives a `bmo-backup-{original_id}` alias so it can be
   identified on subsequent restores without an external mapping file.
+- **Alias is set during bug creation**, not via PUT update, as some BMO instances
+  reject alias modifications through the update endpoint.
+- **Some fields have defaults during restore**: `type` defaults to `defect`,
+  `filed_via` to `other`, when not present in the backup data. The read-only
+  field `cf_last_resolved` is excluded from creation.
 - **API key values** cannot be written back via the REST API. New keys are created
   and their values printed to stdout during restore so you can update your config.
 - **Other users' API keys** are not accessible via the REST API; only the
