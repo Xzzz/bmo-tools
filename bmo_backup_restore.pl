@@ -761,69 +761,27 @@ sub do_deduplicate {
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-sub _auth_headers {
-    my @h;
-    for (my $i = 0; $i < @auth_headers; $i += 2) {
-        push @h, $auth_headers[$i], $auth_headers[$i + 1];
-    }
-    return @h;
-}
+sub api_get { _api_request('GET', shift, undef, @_) }
 
-sub api_get {
-    my ($path, %params) = @_;
-    %params = (%auth, %params);
-    my $qs  = join '&', map { uri_escape($_) . '=' . uri_escape($params{$_}) } keys %params;
+sub api_post { _api_request('POST', @_) }
+
+sub _api_request {
+    my ($method, $path, $data, %params) = @_;
+    my %qs = (%auth, %params);
+    my $qs = join '&', map { uri_escape($_) . '=' . uri_escape($qs{$_}) } keys %qs;
     my $url = "$opts{url}/rest/$path" . ($qs ? "?$qs" : '');
-    my $resp = $ua->get($url, Accept => 'application/json', _auth_headers());
-    _check($resp, "GET $path");
-    return decode_json($resp->decoded_content);
-}
-
-sub api_post {
-    my ($path, $data) = @_;
-    $data = {%auth, %$data};
-    my $resp = $ua->post(
-        "$opts{url}/rest/$path",
-        Content_Type => 'application/json',
-        Accept       => 'application/json',
-        _auth_headers(),
-        Content      => encode_json($data),
-    );
-    _check($resp, "POST $path");
-    return decode_json($resp->decoded_content);
-}
-
-sub api_put {
-    my ($path, $data) = @_;
-    my $qs = join '&', map { uri_escape($_) . '=' . uri_escape($auth{$_}) } keys %auth;
-    my $url = "$opts{url}/rest/$path" . ($qs ? "?$qs" : '');
-    my $req = HTTP::Request->new(PUT => $url);
-    $req->header('Content-Type' => 'application/json');
-    $req->header('Accept'       => 'application/json');
-    my @hdr = _auth_headers();
-    for (my $i = 0; $i < @hdr; $i += 2) {
-        $req->header($hdr[$i] => $hdr[$i + 1]);
-    }
-    $req->content(encode_json($data));
+    my $req = HTTP::Request->new($method => $url, [
+        Accept => 'application/json',
+        ($data ? ('Content-Type' => 'application/json') : ()),
+        @auth_headers,
+    ], $data ? encode_json($data) : undef);
     my $resp = $ua->request($req);
-    _check($resp, "PUT $path");
+    _check($resp, "$method $path");
     return decode_json($resp->decoded_content);
 }
 
-sub api_delete {
-    my ($path) = @_;
-    my %params = %auth;
-    my $qs  = join '&', map { uri_escape($_) . '=' . uri_escape($params{$_}) } keys %params;
-    my $req = HTTP::Request->new(DELETE => "$opts{url}/rest/$path" . ($qs ? "?$qs" : ''));
-    $req->header('Accept' => 'application/json');
-    my @hdr = _auth_headers();
-    for (my $i = 0; $i < @hdr; $i += 2) {
-        $req->header($hdr[$i] => $hdr[$i + 1]);
-    }
-    my $resp = $ua->request($req);
-    _check($resp, "DELETE $path");
-    return decode_json($resp->decoded_content);
-}
+sub api_put    { _api_request('PUT', @_) }
+sub api_delete { _api_request('DELETE', @_) }
 
 sub _check {
     my ($resp, $label) = @_;
