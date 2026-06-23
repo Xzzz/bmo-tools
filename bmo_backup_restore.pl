@@ -858,9 +858,6 @@ sub create_component_via_web {
         my ($page_desc) = $content =~ /og:description"\s+content="([^"]*)"/;
         die "web form failed ($page_title): " . ($page_desc // 'no details') . "\n";
     }
-    # Ensure active — covers case where component already existed but was inactive
-    eval { enable_component_via_web($product, $comp->{name}) };
-    warn "      Warning: could not ensure component active: $@" if $@;
 }
 
 sub enable_component_via_web {
