@@ -74,7 +74,7 @@ if ($opts{full}) {
 }
 
 my $json = JSON->new->utf8->canonical->pretty;
-my $ua   = LWP::UserAgent->new(timeout => 120);
+my $ua   = LWP::UserAgent->new(timeout => 120, cookie_jar => {});
 
 my %auth;
 my @auth_headers;
@@ -83,7 +83,29 @@ if ($opts{apikey}) {
     %auth = (Bugzilla_api_key => $opts{apikey});
 }
 elsif ($opts{login} && $opts{password}) {
-    %auth = (Bugzilla_login => $opts{login}, Bugzilla_password => $opts{password});
+    # Web login to establish session cookie (needed for editcomponents.cgi fallback)
+    my $login_page = $ua->get("$opts{url}/index.cgi?GoAheadAndLogIn=1");
+    my ($login_token) = $login_page->decoded_content =~ /name="Bugzilla_login_token"\s+value="([^"]+)"/;
+    my $web_resp = $ua->post("$opts{url}/index.cgi", {
+        Bugzilla_login       => $opts{login},
+        Bugzilla_password    => $opts{password},
+        Bugzilla_login_token => $login_token // '',
+        GoAheadAndLogIn      => 1,
+    });
+    warn "Web login failed — web form fallbacks will not work.\n"
+        unless $web_resp->decoded_content =~ /Log\s*out/i;
+    # REST login for token-based API calls
+    my $login_url = "$opts{url}/rest/login?"
+        . "login=" . uri_escape($opts{login})
+        . "&password=" . uri_escape($opts{password});
+    my $resp = $ua->get($login_url, Accept => 'application/json');
+    my $body = eval { decode_json($resp->decoded_content) };
+    if ($body && $body->{token}) {
+        %auth = (Bugzilla_token => $body->{token});
+    } else {
+        warn "Login failed, falling back to inline credentials\n";
+        %auth = (Bugzilla_login => $opts{login}, Bugzilla_password => $opts{password});
+    }
 }
 
 if    ($opts{mode} eq 'backup')      { do_backup()      }
@@ -288,6 +310,8 @@ sub _check_backup_version {
         if $b_maj == $c_maj && $b_min > $c_min;
 }
 
+my @_deferred_product_disable;
+
 sub do_restore {
     open my $fh, '<', $opts{file} or die "Cannot read $opts{file}: $!\n";
     my $backup = decode_json(do { local $/; <$fh> });
@@ -339,6 +363,16 @@ sub do_restore {
         print "Fixing up depends_on/blocks relationships...\n";
         fix_relationships(\@bugs, \%id_map);
     }
+
+    # Disable products that were closed in the backup
+    for my $name (@_deferred_product_disable) {
+        eval {
+            api_put("product/" . uri_escape($name), { is_open => JSON->false });
+        } or eval {
+            set_product_open_via_web($name, 0);
+        };
+        warn "Warning: could not disable product '$name': $@\n" if $@;
+    }
 }
 
 sub restore_groups {
@@ -371,13 +405,13 @@ sub restore_products {
 
     # Fetch all existing products with their components, versions, milestones.
     my $existing = eval { api_get('product', type => 'all',
-        include_fields => 'name,components.name,versions.name,milestones.name') };
+        include_fields => 'name,id,is_active,components.name,components.is_active,versions.name,milestones.name') };
     $existing //= eval { api_get('product', type => 'accessible',
-        include_fields => 'name,components.name,versions.name,milestones.name') };
+        include_fields => 'name,id,is_active,components.name,components.is_active,versions.name,milestones.name') };
     my %known_products;
     for my $ep (@{($existing && $existing->{products}) // []}) {
         $known_products{$ep->{name}} = {
-            components => { map { $_->{name} => 1 } @{$ep->{components} // []} },
+            components => { map { $_->{name} => ($_->{is_active} ? 1 : 0) } @{$ep->{components} // []} },
             versions   => { map { $_->{name} => 1 } @{$ep->{versions}   // []} },
             milestones => { map { $_->{name} => 1 } @{$ep->{milestones} // []} },
         };
@@ -390,6 +424,13 @@ sub restore_products {
 
         if ($known) {
             print "    -> already exists, ensuring components/versions/milestones\n";
+            # Ensure product is open so bugs can be filed into it during restore
+            eval {
+                api_put("product/" . uri_escape($p->{name}), { is_open => JSON->true });
+            } or eval {
+                set_product_open_via_web($p->{name}, 1);
+            };
+            warn "    Warning: could not enable product: $@" if $@;
         }
         else {
             # Use the first active non-default version as the initial version for creation.
@@ -404,7 +445,7 @@ sub restore_products {
                     name            => $p->{name},
                     description     => $p->{description} // '',
                     version         => $init_ver->{name},
-                    is_open         => $p->{is_open}         ? JSON->true : JSON->false,
+                    is_open         => JSON->true,
                     has_unconfirmed => $p->{has_unconfirmed} ? JSON->true : JSON->false,
                     ($p->{classification} && $p->{classification} ne 'Unclassified'
                         ? (classification => $p->{classification}) : ()),
@@ -425,22 +466,38 @@ sub restore_products {
         }
 
         for my $c (@{$p->{components} // []}) {
-            next if $known->{components}{$c->{name}};
+            if (exists $known->{components}{$c->{name}}) {
+                # Ensure existing component is active for bug filing
+                if (!$known->{components}{$c->{name}}) {
+                    eval { enable_component_via_web($p->{name}, $c->{name}) };
+                    warn "    Warning: could not enable component '$c->{name}': $@" if $@;
+                }
+                next;
+            }
+            my %comp = (
+                product          => $p->{name},
+                name             => $c->{name},
+                description      => $c->{description} // '',
+                default_assignee => $c->{default_assigned_to} // $c->{default_assignee} // '',
+                ($c->{default_qa_contact}
+                    ? (default_qa_contact => $c->{default_qa_contact}) : ()),
+                ($c->{default_cc} && @{$c->{default_cc}}
+                    ? (default_cc => $c->{default_cc}) : ()),
+                is_active        => JSON->true,
+            );
             eval {
-                api_post('component', {
-                    product          => $p->{name},
-                    name             => $c->{name},
-                    description      => $c->{description} // '',
-                    default_assignee => $c->{default_assigned_to} // $c->{default_assignee} // '',
-                    ($c->{default_qa_contact}
-                        ? (default_qa_contact => $c->{default_qa_contact}) : ()),
-                    ($c->{default_cc} && @{$c->{default_cc}}
-                        ? (default_cc => $c->{default_cc}) : ()),
-                    is_active        => $c->{is_active} ? JSON->true : JSON->false,
-                });
+                api_post('component', \%comp);
                 print "      component '$c->{name}' created\n";
             };
-            warn "    Warning: component '$c->{name}': $@" if $@;
+            if ($@ && $@ =~ /410:/) {
+                eval {
+                    create_component_via_web(\%comp);
+                    print "      component '$c->{name}' created (via web form)\n";
+                };
+                warn "    Warning: component '$c->{name}': $@" if $@;
+            } elsif ($@) {
+                warn "    Warning: component '$c->{name}': $@";
+            }
         }
 
         for my $v (@{$p->{versions} // []}) {
@@ -469,6 +526,8 @@ sub restore_products {
             };
             warn "    Warning: milestone '$m->{name}': $@" if $@;
         }
+
+        push @_deferred_product_disable, $p->{name} if !$p->{is_open};
     }
 }
 
@@ -765,6 +824,95 @@ sub api_get    { _api_request('GET', shift, undef, @_) }
 sub api_post   { _api_request('POST',   @_) }
 sub api_put    { _api_request('PUT',    @_) }
 sub api_delete { _api_request('DELETE', @_) }
+
+# ponytail: web form fallback for component creation (REST auth broken on some BMO versions)
+sub create_component_via_web {
+    my ($comp) = @_;
+    my $product = $comp->{product};
+    # GET the form to extract CSRF token
+    my $form_url = "$opts{url}/editcomponents.cgi?action=add&product=" . uri_escape($product);
+    my $form_resp = $ua->get($form_url);
+    die "failed to load component form: " . $form_resp->status_line . "\n"
+        unless $form_resp->is_success;
+    my ($token) = $form_resp->decoded_content =~ /name="token"\s+value="([^"]+)"/;
+    die "could not extract CSRF token from editcomponents.cgi\n" unless $token;
+    # POST the form
+    my $resp = $ua->post("$opts{url}/editcomponents.cgi", {
+        action          => 'new',
+        product         => $product,
+        component       => $comp->{name},
+        description     => $comp->{description} // '',
+        initialowner    => $comp->{default_assignee} // '',
+        team_name       => $comp->{team_name} // $comp->{default_assignee} // '',
+        isactive        => 1,
+        ($comp->{default_qa_contact}
+            ? (initialqacontact => $comp->{default_qa_contact}) : ()),
+        token           => $token,
+    });
+    die "web form component creation failed: " . $resp->status_line . "\n"
+        unless $resp->is_success;
+    my $content = $resp->decoded_content;
+    # Detect any error page
+    my ($page_title) = $content =~ /og:title"\s+content="([^"]*)"/;
+    if ($page_title && $page_title !~ /Component.*Added|Created/i) {
+        my ($page_desc) = $content =~ /og:description"\s+content="([^"]*)"/;
+        die "web form failed ($page_title): " . ($page_desc // 'no details') . "\n";
+    }
+    # Ensure active — covers case where component already existed but was inactive
+    eval { enable_component_via_web($product, $comp->{name}) };
+    warn "      Warning: could not ensure component active: $@" if $@;
+}
+
+sub enable_component_via_web {
+    my ($product_name, $component_name) = @_;
+    my $form_url = "$opts{url}/editcomponents.cgi?action=edit"
+        . "&product=" . uri_escape($product_name)
+        . "&component=" . uri_escape($component_name);
+    my $form_resp = $ua->get($form_url);
+    die "failed to load component edit form: " . $form_resp->status_line . "\n"
+        unless $form_resp->is_success;
+    my $html = $form_resp->decoded_content;
+    my ($token) = $html =~ /name="token"\s+value="([^"]+)"/;
+    die "could not extract CSRF token from component edit form\n" unless $token;
+    my ($desc) = $html =~ /<textarea[^>]*name="description"[^>]*>(.*?)<\/textarea>/s;
+    my ($owner) = $html =~ /name="initialowner"\s+[^>]*value="([^"]+)"/;
+    my $resp = $ua->post("$opts{url}/editcomponents.cgi", {
+        action          => 'update',
+        product         => $product_name,
+        componentold    => $component_name,
+        component       => $component_name,
+        description     => $desc // '',
+        initialowner    => $owner // '',
+        isactive        => 1,
+        token           => $token,
+    });
+    die "web form component update failed: " . $resp->status_line . "\n"
+        unless $resp->is_success;
+}
+
+sub set_product_open_via_web {
+    my ($product_name, $open) = @_;
+    my $form_url = "$opts{url}/editproducts.cgi?action=edit&product=" . uri_escape($product_name);
+    my $form_resp = $ua->get($form_url);
+    die "failed to load product form: " . $form_resp->status_line . "\n"
+        unless $form_resp->is_success;
+    my $html = $form_resp->decoded_content;
+    my ($token) = $html =~ /name="token"\s+value="([^"]+)"/;
+    die "could not extract CSRF token from editproducts.cgi\n" unless $token;
+    # Extract current description to preserve it
+    my ($desc) = $html =~ /<textarea[^>]*name="description"[^>]*>(.*?)<\/textarea>/s;
+    $desc //= '';
+    my $resp = $ua->post("$opts{url}/editproducts.cgi", {
+        action          => 'update',
+        product_old_name => $product_name,
+        product         => $product_name,
+        description     => $desc,
+        ($open ? (is_active => 1) : ()),
+        token           => $token,
+    });
+    die "web form product update failed: " . $resp->status_line . "\n"
+        unless $resp->is_success;
+}
 
 sub _api_request {
     my ($method, $path, $data, %params) = @_;

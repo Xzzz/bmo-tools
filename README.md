@@ -4,7 +4,8 @@ Utility scripts for BMO (Bugzilla) instance management.
 
 ## bmo_backup_restore.pl
 
-Backup and restore data from a BMO/Bugzilla instance via the REST API.
+Backup and restore data from a BMO/Bugzilla instance via the REST API,
+with automatic web form fallbacks for endpoints where REST auth is broken.
 Useful for preserving a dev/test instance across Docker image rebuilds.
 
 ## What is backed up
@@ -65,6 +66,9 @@ detected via upfront queries and skipped. Bugs are detected via their
 `bmo-backup-{id}` alias. Missing components, versions, and milestones are
 created even when the parent product already exists.
 
+Inactive products are temporarily enabled during restore so bugs can be filed
+into them, then disabled again once all bugs are restored.
+
 ```bash
 # Exclude a user from restore (e.g. the admin account)
 bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json \
@@ -118,10 +122,13 @@ them. On restore and deduplicate, the version is checked:
 Two methods are supported:
 
 - **API key** (recommended): `--apikey=KEY` — sent via `X-BUGZILLA-API-KEY`
-  header.
-- **Login/password**: `--login=EMAIL --password=PASS` — sent as
-  `Bugzilla_login`/`Bugzilla_password` parameters to avoid collisions with
-  data fields in API payloads.
+  header. Works uniformly across all REST endpoints.
+- **Login/password**: `--login=EMAIL --password=PASS` — obtains a REST token
+  via `/rest/login` and establishes a web session (via `index.cgi`) for
+  endpoints where REST token auth is broken. Some BMO endpoints
+  (`POST /rest/component`, `PUT /rest/product`) reject token-based auth;
+  the script automatically falls back to web forms (`editcomponents.cgi`,
+  `editproducts.cgi`) using the session cookie.
 
 ## Error diagnostics
 
@@ -147,3 +154,7 @@ the issue.
   as their initial password.
 - `POST /rest/component`, `/rest/version`, and `/rest/milestone` require
   Bugzilla 5.0+. Failures on older instances produce warnings but do not abort.
+- **Web form fallbacks** (`editcomponents.cgi`, `editproducts.cgi`) are used
+  when REST endpoints reject token auth. These require BMO's `team_name` field
+  for component creation. The fallbacks rely on session cookies, so
+  `--login`/`--password` must be provided (not just `--apikey`).
