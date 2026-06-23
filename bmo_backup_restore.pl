@@ -36,7 +36,7 @@ use HTTP::Request;
 use URI::Escape qw(uri_escape);
 use POSIX qw(strftime);
 
-use constant VERSION => '1.2.0';
+use constant VERSION => '1.3.0';
 
 my %opts = (
     url              => 'http://localhost:8000',
