@@ -42,7 +42,7 @@ my %opts = (
     url              => 'http://localhost:8000',
     file             => 'bugs_backup.json',
     limit            => 500,
-    restore_password => 'BugRestore123!',
+    restore_password => 'password012!',
 );
 my @bug_ids;
 my @skip_users;
@@ -761,9 +761,10 @@ sub do_deduplicate {
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-sub api_get { _api_request('GET', shift, undef, @_) }
-
-sub api_post { _api_request('POST', @_) }
+sub api_get    { _api_request('GET', shift, undef, @_) }
+sub api_post   { _api_request('POST',   @_) }
+sub api_put    { _api_request('PUT',    @_) }
+sub api_delete { _api_request('DELETE', @_) }
 
 sub _api_request {
     my ($method, $path, $data, %params) = @_;
@@ -779,9 +780,6 @@ sub _api_request {
     _check($resp, "$method $path");
     return decode_json($resp->decoded_content);
 }
-
-sub api_put    { _api_request('PUT', @_) }
-sub api_delete { _api_request('DELETE', @_) }
 
 sub _check {
     my ($resp, $label) = @_;
