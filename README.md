@@ -170,16 +170,20 @@ and prints a colored PASS/FAIL summary table with timing.
 ### Usage
 
 ```bash
-# Run from a bmo checkout, or set BMO_DIR to point at one
+# Run from a bmo checkout, pass its path as the last argument, or set BMO_DIR
 cd /path/to/bmo
 bmo_run_tests.pl                 # run all suites
 bmo_run_tests.pl sanity bmo      # run only the named suites
+bmo_run_tests.pl sanity /path/to/bmo   # run in a specific checkout
 bmo_run_tests.pl --build         # docker compose build first, then run all
 bmo_run_tests.pl --list          # list suite names and exit
 bmo_run_tests.pl --usage         # one-line usage and exit
 bmo_run_tests.pl --help          # full help (man page) and exit
 bmo_run_tests.pl --version       # print script version and exit
 ```
+
+If the last argument is not a known suite name, it's taken as the bmo
+checkout directory (overriding `BMO_DIR`).
 
 ### Suites
 
