@@ -59,7 +59,10 @@ if ($list) {
     exit 0;
 }
 
-my @suites = @ARGV ? @ARGV : @ORDER;
+my @args = @ARGV;
+$BMO_DIR = pop @args if @args && !$SUITES{$args[-1]};
+
+my @suites = @args ? @args : @ORDER;
 for my $s (@suites) {
     die "unknown suite '$s', known: @ORDER\n" unless $SUITES{$s};
 }
@@ -104,7 +107,7 @@ bmo_run_tests.pl - run BMO's docker-based test suites with a colored summary
 
 =head1 SYNOPSIS
 
-bmo_run_tests.pl [--build] [--list] [--help] [--usage] [--version] [suite ...]
+bmo_run_tests.pl [--build] [--list] [--help] [--usage] [--version] [suite ...] [dir]
 
 =head1 DESCRIPTION
 
@@ -113,7 +116,9 @@ x4), one after another, each preceded by C<docker compose down -v>. Prints
 a colored PASS/FAIL summary table with per-suite timing at the end. Exits
 non-zero if any suite failed.
 
-Run from a bmo checkout, or set C<BMO_DIR> to point at one.
+Run from a bmo checkout, or pass its path as the last argument, or set
+C<BMO_DIR> to point at one. If the last argument is not a known suite name,
+it is taken as the bmo checkout directory (overriding C<BMO_DIR>).
 
 =head1 SUITES
 
@@ -156,7 +161,8 @@ Print the script version and exit.
 
 =item BMO_DIR
 
-Path to the bmo checkout. Defaults to the current directory.
+Path to the bmo checkout. Defaults to the current directory. Overridden by
+a trailing directory argument on the command line.
 
 =back
 
