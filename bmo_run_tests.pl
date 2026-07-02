@@ -92,9 +92,10 @@ say '';
 say colored(sprintf('%-14s %-6s %8s', 'SUITE', 'RESULT', 'TIME'), 'bold');
 my $failed = 0;
 for my $r (@results) {
-    my $label = $r->{ok} ? colored('PASS', 'green') : colored('FAIL', 'red');
+    my $status = $r->{ok} ? 'PASS' : 'FAIL';
+    my $label  = colored(sprintf('%-6s', $status), $r->{ok} ? 'green' : 'red');
     $failed++ unless $r->{ok};
-    printf "%-14s %-6s %7.1fs\n", $r->{name}, $label, $r->{dur};
+    printf "%-14s %s %8s\n", $r->{name}, $label, sprintf('%.1fs', $r->{dur});
 }
 
 exit($failed ? 1 : 0);
