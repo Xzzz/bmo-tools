@@ -106,7 +106,10 @@ enabled in the Bugzilla configuration, or marked `RESOLVED DUPLICATE` otherwise.
 | `--bug` | — | Specific bug ID (repeatable) |
 | `--product` | — | Backup bugs in this product |
 | `--limit` | `500` | Max bugs per product query |
-| `--restore-password` | `BugRestore123!` | Initial password for restored users |
+| `--restore-password` | `password012!` | Initial password for restored users |
+| `--usage` | — | Print a one-line usage summary and exit |
+| `--help` | — | Print full help (man page) and exit |
+| `--version` | — | Print the script version and exit |
 
 ### Versioning
 
