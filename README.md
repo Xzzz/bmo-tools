@@ -8,7 +8,7 @@ Backup and restore data from a BMO/Bugzilla instance via the REST API,
 with automatic web form fallbacks for endpoints where REST auth is broken.
 Useful for preserving a dev/test instance across Docker image rebuilds.
 
-## What is backed up
+### What is backed up
 
 | Section | Content |
 |---|---|
@@ -17,21 +17,21 @@ Useful for preserving a dev/test instance across Docker image rebuilds.
 | **Users** | Email, full name, group memberships, login/email status, API keys (authenticated user only) |
 | **Bugs** | All fields, comments, attachments, flags, custom fields |
 
-## Installation
+### Installation
 
 ```bash
 cpanm Getopt::Long JSON::MaybeXS LWP::UserAgent HTTP::Request URI::Escape
 ```
 
-## Usage
+### Usage
 
-### Full instance backup
+#### Full instance backup
 
 ```bash
 bmo_backup_restore.pl --mode=backup --apikey=KEY --full
 ```
 
-### Selective backup
+#### Selective backup
 
 ```bash
 # Structural data only (no bugs)
@@ -49,7 +49,7 @@ bmo_backup_restore.pl --mode=backup --apikey=KEY --full \
                       --skip-user=admin@mozilla.bugs
 ```
 
-### Restore
+#### Restore
 
 ```bash
 bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json
@@ -75,7 +75,7 @@ bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json \
                       --skip-user=admin@mozilla.bugs
 ```
 
-### Remove duplicate bugs
+#### Remove duplicate bugs
 
 If bugs were restored more than once before the alias-based deduplication was
 introduced, duplicates can be cleaned up with:
@@ -89,7 +89,7 @@ component, and description as the canonical copy (the one carrying the
 `bmo-backup-{id}` alias). Duplicates are deleted if `allowbugdeletion` is
 enabled in the Bugzilla configuration, or marked `RESOLVED DUPLICATE` otherwise.
 
-## Options
+### Options
 
 | Option | Default | Description |
 |---|---|---|
@@ -108,7 +108,7 @@ enabled in the Bugzilla configuration, or marked `RESOLVED DUPLICATE` otherwise.
 | `--limit` | `500` | Max bugs per product query |
 | `--restore-password` | `BugRestore123!` | Initial password for restored users |
 
-## Versioning
+### Versioning
 
 Backup files include a `version` field matching the script version that created
 them. On restore and deduplicate, the version is checked:
@@ -117,7 +117,7 @@ them. On restore and deduplicate, the version is checked:
 - **Higher major version**: restore is aborted (incompatible format).
 - **Higher minor version**: a warning is printed but restore proceeds.
 
-## Authentication
+### Authentication
 
 Two methods are supported:
 
@@ -130,13 +130,13 @@ Two methods are supported:
   the script automatically falls back to web forms (`editcomponents.cgi`,
   `editproducts.cgi`) using the session cookie.
 
-## Error diagnostics
+### Error diagnostics
 
 When an API call fails, the error message includes both the full response body
 and the request payload, making it easier to identify which field is causing
 the issue.
 
-## Known limitations
+### Known limitations
 
 - **Bug IDs, reporter, and timestamps** cannot be preserved (REST API limitation).
   Each restored bug receives a `bmo-backup-{original_id}` alias so it can be
@@ -158,3 +158,35 @@ the issue.
   when REST endpoints reject token auth. These require BMO's `team_name` field
   for component creation. The fallbacks rely on session cookies, so
   `--login`/`--password` must be provided (not just `--apikey`).
+
+## bmo_run_tests.pl
+
+Runs BMO's docker-based test suites (sanity, unit, webservices, selenium ×4)
+and prints a colored PASS/FAIL summary table with timing.
+
+### Usage
+
+```bash
+# Run from a bmo checkout, or set BMO_DIR to point at one
+cd /path/to/bmo
+bmo_run_tests.pl                 # run all suites
+bmo_run_tests.pl sanity bmo      # run only the named suites
+bmo_run_tests.pl --build         # docker compose build first, then run all
+bmo_run_tests.pl --list          # list suite names and exit
+bmo_run_tests.pl --usage         # one-line usage and exit
+bmo_run_tests.pl --help          # full help (man page) and exit
+bmo_run_tests.pl --version       # print script version and exit
+```
+
+### Suites
+
+| Suite | Runs |
+|---|---|
+| `sanity` | `test_sanity` over `t/*.t extensions/*/t/*.t` |
+| `bmo` | `test_bmo -q -f` over `t/bmo/*.t extensions/*/t/bmo/*.t` (with `CI=1`) |
+| `webservices` | `test_webservices` |
+| `selenium1`..`selenium4` | `test_selenium` with `SELENIUM_GROUP=1..4` |
+
+Each suite runs `docker compose down -v` before it starts, to reset state.
+Exit code is non-zero if any suite failed.
+
