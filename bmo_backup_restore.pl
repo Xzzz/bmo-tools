@@ -13,7 +13,7 @@ use URI::Escape qw(uri_escape);
 use POSIX qw(strftime);
 use Pod::Usage qw(pod2usage);
 
-use constant VERSION => '1.3.0';
+use constant VERSION => '1.4.0';
 
 my %opts = (
     url              => 'http://localhost:8000',
@@ -1103,7 +1103,7 @@ backup/restore/deduplicate are reported as warnings and do not abort the run.
 
 =head1 VERSION
 
-1.3.0
+1.4.0
 
 =head1 AUTHOR
 
