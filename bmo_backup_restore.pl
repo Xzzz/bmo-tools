@@ -1,29 +1,5 @@
 #!/usr/bin/env perl
 # Backup and restore data from a BMO/Bugzilla instance.
-# Covers groups, products (components/versions/milestones), users, and bugs.
-# Useful for preserving a dev/test instance across Docker image rebuilds.
-#
-# Usage:
-#   Backup bugs only (by ID):
-#     bmo_backup_restore.pl --mode=backup --apikey=KEY --bug=1 --bug=2
-#   Backup bugs by product:
-#     bmo_backup_restore.pl --mode=backup --apikey=KEY --product="TestProduct"
-#   Full instance backup (groups + products + users + all bugs):
-#     bmo_backup_restore.pl --mode=backup --apikey=KEY --full
-#   Selective backup (structural data only, no bugs):
-#     bmo_backup_restore.pl --mode=backup --apikey=KEY --groups --products --users
-#   Restore (auto-detects which sections are present):
-#     bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json
-#
-# Notes:
-#   - Bug IDs, reporter, and timestamps cannot be preserved (REST API limitation).
-#   - A JSON file mapping old bug IDs to new IDs is written alongside the backup.
-#   - depends_on/blocks relationships are wired up in a second pass.
-#   - Status/resolution is applied via PUT after bug creation.
-#   - Restored users receive --restore-password (default: BugRestore123!) as password.
-#   - API keys for the authenticated backup user are saved; new values are printed on
-#     restore since the original key values cannot be written back via the REST API.
-#   - Other users' API keys are not accessible via the REST API.
 
 use 5.10.1;
 use strict;
@@ -35,6 +11,7 @@ use LWP::UserAgent;
 use HTTP::Request;
 use URI::Escape qw(uri_escape);
 use POSIX qw(strftime);
+use Pod::Usage qw(pod2usage);
 
 use constant VERSION => '1.3.0';
 
@@ -63,9 +40,19 @@ GetOptions(
     'products'           => \$opts{include_products},
     'users'              => \$opts{include_users},
     'restore-password=s' => \$opts{restore_password},
-) or usage();
+    'help'                => \my $help,
+    'usage'               => \my $show_usage,
+    'version'             => \my $show_version,
+) or pod2usage(2);
 
-usage() unless ($opts{mode} // '') =~ /^(backup|restore|deduplicate)$/;
+pod2usage(-exitval => 0, -verbose => 1) if $show_usage;
+pod2usage(-exitval => 0, -verbose => 2) if $help;
+if ($show_version) {
+    print VERSION, "\n";
+    exit 0;
+}
+
+pod2usage(2) unless ($opts{mode} // '') =~ /^(backup|restore|deduplicate)$/;
 
 if ($opts{full}) {
     $opts{include_groups}   = 1;
@@ -944,40 +931,115 @@ sub _check {
 
 # ---------------------------------------------------------------------------
 
-sub usage {
-    die <<'END';
-Usage: bmo_backup_restore.pl --mode=backup|restore|deduplicate [options]
+__END__
 
-Options:
-  --mode=backup|restore|deduplicate  Required
-  --url=URL                Bugzilla base URL  (default: http://localhost:8000)
-  --apikey=KEY             API key for authentication
-  --login=EMAIL            Login email (alternative to --apikey)
-  --password=PASS          Password   (alternative to --apikey)
-  --file=FILE              Backup file path   (default: bugs_backup.json)
+=head1 NAME
 
-Backup options:
-  --full                   Full instance backup: groups + products + users + all bugs
-  --groups                 Include groups
-  --products               Include products (components, versions, milestones)
-  --users                  Include users and their API keys
-  --skip-user=EMAIL        Exclude a user from backup (repeatable)
-  --bug=ID                 Specific bug ID to backup (repeatable; combinable with --groups etc.)
-  --product=NAME           Backup bugs in this product (combinable with --groups etc.)
-  --limit=N                Max bugs per product query (default: 500)
+bmo_backup_restore.pl - backup and restore data from a BMO/Bugzilla instance
 
-Restore options:
-  --restore-password=PASS  Initial password for restored users (default: BugRestore123!)
+=head1 SYNOPSIS
 
-Restore is automatic: all sections present in the backup file are restored in order
-(groups → products → users → bugs).
+bmo_backup_restore.pl --mode=backup|restore|deduplicate [options]
 
-Deduplicate scans the backup file and, for each bug, deletes any copy that shares
-the same summary, product, component, and description but lacks the bmo-backup-N
-alias. Deletion requires allowbugdeletion in Bugzilla config; otherwise the
-duplicate is marked RESOLVED DUPLICATE.
+  bmo_backup_restore.pl --mode=backup  --apikey=KEY --full
+  bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json
+  bmo_backup_restore.pl --mode=deduplicate --apikey=KEY --file=backup.json
 
-Examples:
+=head1 DESCRIPTION
+
+Backs up and restores data from a BMO/Bugzilla instance via the REST API,
+with automatic web form fallbacks for endpoints where REST auth is broken.
+Covers groups, products (components/versions/milestones), users, and bugs.
+Useful for preserving a dev/test instance across Docker image rebuilds.
+
+Restore is automatic: all sections present in the backup file are restored
+in order (groups -> products -> users -> bugs). Running restore a second
+time on the same instance is safe -- existing groups, products, and users
+are detected via upfront queries and skipped. Bugs are detected via their
+C<bmo-backup-{id}> alias.
+
+Deduplicate scans the backup file and, for each bug, deletes any copy that
+shares the same summary, product, component, and description but lacks the
+C<bmo-backup-N> alias. Deletion requires C<allowbugdeletion> in the Bugzilla
+config; otherwise the duplicate is marked C<RESOLVED DUPLICATE>.
+
+=head1 OPTIONS
+
+=over 4
+
+=item --mode=backup|restore|deduplicate
+
+Required. Selects the operation to perform.
+
+=item --url=URL
+
+Bugzilla base URL. Default: C<http://localhost:8000>.
+
+=item --apikey=KEY
+
+API key for authentication, sent via the C<X-BUGZILLA-API-KEY> header.
+
+=item --login=EMAIL / --password=PASS
+
+Alternative to C<--apikey>. Obtains a REST token and establishes a web
+session for endpoints where REST token auth is broken.
+
+=item --file=FILE
+
+Backup file path. Default: C<bugs_backup.json>.
+
+=item --full
+
+Full instance backup: groups + products + users + all bugs.
+
+=item --groups
+
+Include groups in the backup.
+
+=item --products
+
+Include products (components, versions, milestones) in the backup.
+
+=item --users
+
+Include users and their API keys in the backup.
+
+=item --skip-user=EMAIL
+
+Exclude a user from backup or restore by email. Repeatable.
+
+=item --bug=ID
+
+Specific bug ID to backup. Repeatable; combinable with C<--groups> etc.
+
+=item --product=NAME
+
+Backup bugs in this product. Combinable with C<--groups> etc.
+
+=item --limit=N
+
+Max bugs per product query. Default: 500.
+
+=item --restore-password=PASS
+
+Initial password for restored users. Default: C<password012!>.
+
+=item --usage
+
+Print a one-line usage summary and exit.
+
+=item --help
+
+Print this full help text and exit.
+
+=item --version
+
+Print the script version and exit.
+
+=back
+
+=head1 EXAMPLES
+
   bmo_backup_restore.pl --mode=backup       --apikey=abc123 --bug=1 --bug=2
   bmo_backup_restore.pl --mode=backup       --apikey=abc123 --product="TestProduct"
   bmo_backup_restore.pl --mode=backup       --apikey=abc123 --full
@@ -986,5 +1048,65 @@ Examples:
   bmo_backup_restore.pl --mode=restore      --apikey=abc123 --file=bugs_backup.json \
                         --restore-password="MyDevPass1"
   bmo_backup_restore.pl --mode=deduplicate  --apikey=abc123 --file=bugs_backup.json
-END
-}
+
+=head1 NOTES AND LIMITATIONS
+
+=over 4
+
+=item *
+
+Bug IDs, reporter, and timestamps cannot be preserved (REST API limitation).
+Each restored bug receives a C<bmo-backup-{original_id}> alias so it can be
+identified on subsequent restores without an external mapping file.
+
+=item *
+
+depends_on/blocks relationships are wired up in a second pass, after all
+bugs have been created.
+
+=item *
+
+Status/resolution is applied via PUT after bug creation, since POST rejects
+non-open statuses.
+
+=item *
+
+API key values cannot be written back via the REST API. New keys are
+created and their values printed to stdout during restore so you can
+update your config. Other users' API keys are not accessible via the
+REST API; only the authenticated user's keys are backed up.
+
+=item *
+
+User passwords are not stored. Restored accounts receive
+C<--restore-password> as their initial password.
+
+=item *
+
+C<POST /rest/component>, C</rest/version>, and C</rest/milestone> require
+Bugzilla 5.0+. Failures on older instances produce warnings but do not abort.
+
+=item *
+
+Web form fallbacks (C<editcomponents.cgi>, C<editproducts.cgi>) are used
+when REST endpoints reject token auth. These require BMO's C<team_name>
+field for component creation, and rely on session cookies, so
+C<--login>/C<--password> must be provided (not just C<--apikey>).
+
+=back
+
+=head1 EXIT STATUS
+
+Non-zero if any unrecoverable error occurs (e.g. missing C<--mode>, unreadable
+backup file, or an incompatible backup version). Per-item failures during
+backup/restore/deduplicate are reported as warnings and do not abort the run.
+
+=head1 VERSION
+
+1.3.0
+
+=head1 AUTHOR
+
+Xavier L'Hour
+
+=cut
