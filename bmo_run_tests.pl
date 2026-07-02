@@ -10,7 +10,7 @@ use Pod::Usage qw(pod2usage);
 use Term::ANSIColor qw(colored);
 use Time::HiRes qw(time);
 
-use constant VERSION => '1.0.0';
+use constant VERSION => '1.1.0';
 
 my $BMO_DIR = $ENV{BMO_DIR} // '.';
 my $COMPOSE = ['docker', 'compose', '-f', 'docker-compose.test.yml'];
@@ -173,7 +173,7 @@ found under C<BMO_DIR>.
 
 =head1 VERSION
 
-1.0.0
+1.1.0
 
 =head1 AUTHOR
 
