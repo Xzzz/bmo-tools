@@ -10,7 +10,7 @@ use Pod::Usage qw(pod2usage);
 use Term::ANSIColor qw(colored);
 use Time::HiRes qw(time);
 
-use constant VERSION => '1.1.1';
+use constant VERSION => '1.1.2';
 
 my $BMO_DIR = $ENV{BMO_DIR} // '.';
 my $COMPOSE = ['docker', 'compose', '-f', 'docker-compose.test.yml'];
@@ -30,7 +30,7 @@ my %SUITES = (
     (map {
         my $n = $_;
         ("selenium$n" => sub {
-            return [@$COMPOSE, '-e', "SELENIUM_GROUP=$n", 'run', 'bmo.test', 'test_selenium'];
+            return [@$COMPOSE, 'run', '-e', "SELENIUM_GROUP=$n", 'bmo.test', 'test_selenium'];
         })
     } 1 .. 4),
 );
@@ -174,7 +174,7 @@ found under C<BMO_DIR>.
 
 =head1 VERSION
 
-1.1.1
+1.1.2
 
 =head1 AUTHOR
 
