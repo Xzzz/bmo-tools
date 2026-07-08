@@ -164,8 +164,11 @@ the issue.
 
 ## bmo_run_tests.pl
 
-Runs BMO's docker-based test suites (sanity, unit, webservices, selenium ×4)
-and prints a colored PASS/FAIL summary table with timing.
+Runs BMO's docker-based test suites (sanity, unit, webservices, selenium ×4).
+Each suite's docker output goes to its own log file; the terminal shows a
+live-updating status table instead (SUITE / RESULT / TIME / that suite's
+log path), with an animated hourglass for suites still queued and a
+spinner for suites currently running.
 
 ### Usage
 
@@ -177,6 +180,7 @@ bmo_run_tests.pl sanity bmo      # run only the named suites
 bmo_run_tests.pl sanity /path/to/bmo   # run in a specific checkout
 bmo_run_tests.pl --build         # docker compose build first, then run all
 bmo_run_tests.pl --remove-orphans # pass --remove-orphans to down/run calls
+bmo_run_tests.pl --jobs 4        # run up to 4 suites concurrently
 bmo_run_tests.pl --list          # list suite names and exit
 bmo_run_tests.pl --usage         # one-line usage and exit
 bmo_run_tests.pl --help          # full help (man page) and exit
@@ -198,5 +202,15 @@ checkout directory (overriding `BMO_DIR`).
 Each suite runs `docker compose down -v` before it starts, to reset state.
 Pass `--remove-orphans` to also clean up containers for services removed or
 renamed since the compose file last changed.
+
+With `--jobs`/`-j`, up to that many suites run concurrently instead of one
+at a time. Each gets its own compose project (its own DB, memcached, etc.),
+and the fixed host ports in `docker-compose.test.yml` are overridden to
+Docker-assigned free ones, so concurrent suites can't collide.
+
+`^C` stops any running and queued suites and cleans up their docker
+containers, networks, and volumes before exiting. A second `^C` exits
+immediately without cleaning up.
+
 Exit code is non-zero if any suite failed.
 
