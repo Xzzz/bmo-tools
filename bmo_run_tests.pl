@@ -13,7 +13,7 @@ use Pod::Usage qw(pod2usage);
 use Term::ANSIColor qw(colored);
 use Time::HiRes qw(time);
 
-use constant VERSION => '1.3.0';
+use constant VERSION => '1.3.1';
 
 my $BMO_DIR = $ENV{BMO_DIR} // '.';
 my $remove_orphans;
@@ -94,7 +94,7 @@ chdir $BMO_DIR or die "chdir $BMO_DIR: $!\n";
 
 # Every suite's docker output goes to its own log file rather than the
 # terminal; the terminal instead shows one continuously redrawn status table
-# (SUITE / RESULT / TIME / log path), so logs never interleave.
+# (SUITE / STATUS / TIME / log path), so logs never interleave.
 my $logdir = tempdir(CLEANUP => 0);
 
 if ($build) {
@@ -135,11 +135,11 @@ my @queue = @suites;
 
 END { print "\e[?25h" } # always restore the cursor, even on die/^C
 
-# ponytail: braille/hourglass glyphs can render as double-width in some
-# terminals and drift columns by a column; not chasing wcwidth for this,
-# live with the occasional wobble.
-my @SPIN  = qw(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏);
-my @GLASS = ('⏳', '⌛');
+# ASCII only: braille/hourglass glyphs render double-width in some terminal
+# fonts while sprintf still counts them as one column, drifting the columns
+# after them by one. Plain ASCII has no such ambiguity.
+my @SPIN  = ('|', '/', '-', '\\');
+my @GLASS = ('.', 'o', 'O', 'o');
 my $frame = 0;
 my $drawn;
 
@@ -161,7 +161,7 @@ my $bottom = $border->('└', '┴', '┘');
 my $draw = sub {
     print "\e[${nlines}A" if $drawn;
     print $top, "\e[K\n";
-    print colored(sprintf('│ %-*s │ %-*s │ %*s │ %-*s │', $w_suite, 'SUITE', $w_result, 'RESULT', $w_time, 'TIME', $w_log, 'LOG'), 'bold'), "\e[K\n";
+    print colored(sprintf('│ %-*s │ %-*s │ %*s │ %-*s │', $w_suite, 'SUITE', $w_result, 'STATUS', $w_time, 'TIME', $w_log, 'LOG'), 'bold'), "\e[K\n";
     print $midsep, "\e[K\n";
     for my $s (@suites) {
         my $st = $status{$s};
@@ -218,6 +218,11 @@ while (1) {
         die "fork: $!\n" unless defined $pid;
         if ($pid == 0) {
             setpgid(0, 0); # own group, so it's only ever killed via $running above
+            # docker compose still sees an inherited stdin fd pointing at the
+            # real tty and, being in a background group now, gets suspended
+            # (SIGTTIN/SIGTTOU) the moment it does any tty job-control, even
+            # after the containerized test finished. /dev/null sidesteps it.
+            open(STDIN, '<', '/dev/null') or die "/dev/null: $!\n";
             open(STDOUT, '>', $logpath{$s}) or die "$logpath{$s}: $!\n";
             open(STDERR, '>&STDOUT') or die "dup STDERR: $!\n";
             say "==> $s";
@@ -286,7 +291,7 @@ bmo_run_tests.pl [--build] [--jobs N] [--remove-orphans] [--list] [--help] [--us
 Runs BMO's docker-compose test suites (sanity, unit, webservices, selenium
 x4), each preceded by C<docker compose down -v>. Each suite's docker output
 goes to its own log file rather than the terminal; the terminal instead
-shows a live-updating status table (SUITE / RESULT / TIME / that suite's
+shows a live-updating status table (SUITE / STATUS / TIME / that suite's
 log path), with an animated hourglass for suites still queued and an
 animated spinner for suites currently running.
 Exits non-zero if any suite failed.
@@ -368,7 +373,7 @@ found under C<BMO_DIR>.
 
 =head1 VERSION
 
-1.3.0
+1.3.1
 
 =head1 AUTHOR
 

@@ -166,7 +166,7 @@ the issue.
 
 Runs BMO's docker-based test suites (sanity, unit, webservices, selenium ×4).
 Each suite's docker output goes to its own log file; the terminal shows a
-live-updating status table instead (SUITE / RESULT / TIME / that suite's
+live-updating status table instead (SUITE / STATUS / TIME / that suite's
 log path), with an animated hourglass for suites still queued and a
 spinner for suites currently running.
 
