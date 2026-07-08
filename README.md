@@ -176,6 +176,7 @@ bmo_run_tests.pl                 # run all suites
 bmo_run_tests.pl sanity bmo      # run only the named suites
 bmo_run_tests.pl sanity /path/to/bmo   # run in a specific checkout
 bmo_run_tests.pl --build         # docker compose build first, then run all
+bmo_run_tests.pl --remove-orphans # pass --remove-orphans to down/run calls
 bmo_run_tests.pl --list          # list suite names and exit
 bmo_run_tests.pl --usage         # one-line usage and exit
 bmo_run_tests.pl --help          # full help (man page) and exit
@@ -195,5 +196,7 @@ checkout directory (overriding `BMO_DIR`).
 | `selenium1`..`selenium4` | `test_selenium` with `SELENIUM_GROUP=1..4` |
 
 Each suite runs `docker compose down -v` before it starts, to reset state.
+Pass `--remove-orphans` to also clean up containers for services removed or
+renamed since the compose file last changed.
 Exit code is non-zero if any suite failed.
 

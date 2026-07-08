@@ -10,27 +10,28 @@ use Pod::Usage qw(pod2usage);
 use Term::ANSIColor qw(colored);
 use Time::HiRes qw(time);
 
-use constant VERSION => '1.1.2';
+use constant VERSION => '1.2.0';
 
 my $BMO_DIR = $ENV{BMO_DIR} // '.';
 my $COMPOSE = ['docker', 'compose', '-f', 'docker-compose.test.yml'];
+my $remove_orphans;
 
 my %SUITES = (
     sanity => sub {
         my @t = (glob('t/*.t'), glob('extensions/*/t/*.t'));
-        return [@$COMPOSE, qw(run --no-deps bmo.test test_sanity), @t];
+        return [@$COMPOSE, 'run', ($remove_orphans ? '--remove-orphans' : ()), qw(--no-deps bmo.test test_sanity), @t];
     },
     bmo => sub {
         my @t = (glob('t/bmo/*.t'), glob('extensions/*/t/bmo/*.t'));
-        return [@$COMPOSE, qw(run -e CI=1 bmo.test test_bmo -q -f), @t];
+        return [@$COMPOSE, 'run', ($remove_orphans ? '--remove-orphans' : ()), qw(-e CI=1 bmo.test test_bmo -q -f), @t];
     },
     webservices => sub {
-        return [@$COMPOSE, qw(run bmo.test test_webservices)];
+        return [@$COMPOSE, 'run', ($remove_orphans ? '--remove-orphans' : ()), qw(bmo.test test_webservices)];
     },
     (map {
         my $n = $_;
         ("selenium$n" => sub {
-            return [@$COMPOSE, 'run', '-e', "SELENIUM_GROUP=$n", 'bmo.test', 'test_selenium'];
+            return [@$COMPOSE, 'run', ($remove_orphans ? '--remove-orphans' : ()), '-e', "SELENIUM_GROUP=$n", 'bmo.test', 'test_selenium'];
         })
     } 1 .. 4),
 );
@@ -39,11 +40,12 @@ my @ORDER = qw(sanity bmo webservices selenium1 selenium2 selenium3 selenium4);
 
 my ($build, $list, $help, $usage, $version);
 GetOptions(
-    'build'   => \$build,
-    'list'    => \$list,
-    'help'    => \$help,
-    'usage'   => \$usage,
-    'version' => \$version,
+    'build'           => \$build,
+    'list'            => \$list,
+    'help'            => \$help,
+    'usage'           => \$usage,
+    'version'         => \$version,
+    'remove-orphans'  => \$remove_orphans,
 ) or pod2usage(2);
 
 pod2usage(-exitval => 0, -verbose => 1) if $usage;
@@ -78,7 +80,7 @@ if ($build) {
 my @results;
 for my $s (@suites) {
     say colored("==> $s", 'bold');
-    system(@$COMPOSE, qw(down -v));
+    system(@$COMPOSE, 'down', '-v', ($remove_orphans ? '--remove-orphans' : ()));
 
     my $cmd = $SUITES{$s}->();
     my $start = time;
@@ -108,7 +110,7 @@ bmo_run_tests.pl - run BMO's docker-based test suites with a colored summary
 
 =head1 SYNOPSIS
 
-bmo_run_tests.pl [--build] [--list] [--help] [--usage] [--version] [suite ...] [dir]
+bmo_run_tests.pl [--build] [--remove-orphans] [--list] [--help] [--usage] [--version] [suite ...] [dir]
 
 =head1 DESCRIPTION
 
@@ -137,6 +139,12 @@ With no suite arguments, all suites run in the order above.
 =item --build
 
 Run C<docker compose build> before running the selected suites.
+
+=item --remove-orphans
+
+Pass C<--remove-orphans> to every C<docker compose down>/C<run> call, to
+clean up containers left behind by services removed or renamed since the
+compose file last changed.
 
 =item --list
 
@@ -174,7 +182,7 @@ found under C<BMO_DIR>.
 
 =head1 VERSION
 
-1.1.2
+1.2.0
 
 =head1 AUTHOR
 
