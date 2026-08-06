@@ -79,7 +79,7 @@ elsif ($opts{login} && $opts{password}) {
         Bugzilla_login_token => $login_token // '',
         GoAheadAndLogIn      => 1,
     });
-    warn "Web login failed — web form fallbacks will not work.\n"
+    warn "Web login failed - web form fallbacks will not work.\n"
         unless $web_resp->decoded_content =~ /Log\s*out/i;
     # REST login for token-based API calls
     my $login_url = "$opts{url}/rest/login?"
@@ -212,7 +212,7 @@ sub backup_users {
         }
     }
 
-    warn "  Warning: no users returned — check that your credentials have 'editusers' privilege.\n"
+    warn "  Warning: no users returned - check that your credentials have 'editusers' privilege.\n"
         unless @users;
 
     if (@skip_users) {
@@ -611,7 +611,7 @@ sub restore_bug {
 
     $create{filed_via} = $bug->{filed_via} // 'other';
 
-    # Scalar fields — copy only when non-empty.
+    # Scalar fields - copy only when non-empty.
     # status/resolution excluded: Bugzilla rejects POST with non-open statuses.
     for my $f (qw(
         severity priority op_sys platform url whiteboard
@@ -657,7 +657,7 @@ sub restore_bug {
     my $new_id = $result->{id} // ($result->{ids} ? $result->{ids}[0] : undef)
         or die "Bug creation returned no ID (response: " . encode_json($result) . ")\n";
 
-    # Status/resolution — always applied via PUT; POST rejects non-open statuses.
+    # Status/resolution - always applied via PUT; POST rejects non-open statuses.
     my $want_status     = $bug->{status}     // '';
     my $want_resolution = $bug->{resolution} // '';
     if ($want_status ne '' && ($result->{status} // '') ne $want_status) {

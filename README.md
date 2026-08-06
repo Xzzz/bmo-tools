@@ -61,7 +61,7 @@ bmo_backup_restore.pl --mode=restore --apikey=KEY --file=backup.json \
 
 Restore is automatic: all sections present in the backup file are applied in
 the correct order (groups → products → users → bugs). Running restore a second
-time on the same instance is safe — existing groups, products, and users are
+time on the same instance is safe - existing groups, products, and users are
 detected via upfront queries and skipped. Bugs are detected via their
 `bmo-backup-{id}` alias. Missing components, versions, and milestones are
 created even when the parent product already exists.
@@ -93,23 +93,23 @@ enabled in the Bugzilla configuration, or marked `RESOLVED DUPLICATE` otherwise.
 
 | Option | Default | Description |
 |---|---|---|
-| `--mode` | — | `backup`, `restore`, or `deduplicate` (required) |
+| `--mode` | - | `backup`, `restore`, or `deduplicate` (required) |
 | `--url` | `http://localhost:8000` | Bugzilla base URL |
-| `--apikey` | — | API key for authentication |
-| `--login` / `--password` | — | Alternative to `--apikey` |
+| `--apikey` | - | API key for authentication |
+| `--login` / `--password` | - | Alternative to `--apikey` |
 | `--file` | `bugs_backup.json` | Backup file path |
-| `--full` | — | Backup groups + products + users + all bugs |
-| `--groups` | — | Include groups in backup |
-| `--products` | — | Include products (components, versions, milestones) |
-| `--users` | — | Include users and their API keys |
-| `--skip-user` | — | Exclude a user from backup/restore by email (repeatable) |
-| `--bug` | — | Specific bug ID (repeatable) |
-| `--product` | — | Backup bugs in this product |
+| `--full` | - | Backup groups + products + users + all bugs |
+| `--groups` | - | Include groups in backup |
+| `--products` | - | Include products (components, versions, milestones) |
+| `--users` | - | Include users and their API keys |
+| `--skip-user` | - | Exclude a user from backup/restore by email (repeatable) |
+| `--bug` | - | Specific bug ID (repeatable) |
+| `--product` | - | Backup bugs in this product |
 | `--limit` | `500` | Max bugs per product query |
 | `--restore-password` | `password012!` | Initial password for restored users |
-| `--usage` | — | Print a one-line usage summary and exit |
-| `--help` | — | Print full help (man page) and exit |
-| `--version` | — | Print the script version and exit |
+| `--usage` | - | Print a one-line usage summary and exit |
+| `--help` | - | Print full help (man page) and exit |
+| `--version` | - | Print the script version and exit |
 
 ### Versioning
 
@@ -124,9 +124,9 @@ them. On restore and deduplicate, the version is checked:
 
 Two methods are supported:
 
-- **API key** (recommended): `--apikey=KEY` — sent via `X-BUGZILLA-API-KEY`
+- **API key** (recommended): `--apikey=KEY` - sent via `X-BUGZILLA-API-KEY`
   header. Works uniformly across all REST endpoints.
-- **Login/password**: `--login=EMAIL --password=PASS` — obtains a REST token
+- **Login/password**: `--login=EMAIL --password=PASS` - obtains a REST token
   via `/rest/login` and establishes a web session (via `index.cgi`) for
   endpoints where REST token auth is broken. Some BMO endpoints
   (`POST /rest/component`, `PUT /rest/product`) reject token-based auth;
@@ -179,7 +179,6 @@ bmo_run_tests.pl                 # run all suites
 bmo_run_tests.pl sanity bmo      # run only the named suites
 bmo_run_tests.pl sanity /path/to/bmo   # run in a specific checkout
 bmo_run_tests.pl --build         # docker compose build first, then run all
-bmo_run_tests.pl --remove-orphans # pass --remove-orphans to down/run calls
 bmo_run_tests.pl --jobs 4        # run up to 4 suites concurrently
 bmo_run_tests.pl --list          # list suite names and exit
 bmo_run_tests.pl --usage         # one-line usage and exit
@@ -199,9 +198,11 @@ checkout directory (overriding `BMO_DIR`).
 | `webservices` | `test_webservices` |
 | `selenium1`..`selenium4` | `test_selenium` with `SELENIUM_GROUP=1..4` |
 
-Each suite runs `docker compose down -v` before it starts, to reset state.
-Pass `--remove-orphans` to also clean up containers for services removed or
-renamed since the compose file last changed.
+Each suite runs `docker compose down -v --remove-orphans` before it starts,
+to reset state - including any leftover one-off `run` container from an
+earlier interrupted or ad hoc invocation, which would otherwise hold onto
+the same named volumes as the next "fresh" run and leak DB/schema state
+across runs.
 
 With `--jobs`/`-j`, up to that many suites run concurrently instead of one
 at a time. Each gets its own compose project (its own DB, memcached, etc.),

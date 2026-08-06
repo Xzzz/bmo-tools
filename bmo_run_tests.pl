@@ -13,10 +13,9 @@ use Pod::Usage qw(pod2usage);
 use Term::ANSIColor qw(colored);
 use Time::HiRes qw(time);
 
-use constant VERSION => '1.3.1';
+use constant VERSION => '1.3.2';
 
 my $BMO_DIR = $ENV{BMO_DIR} // '.';
-my $remove_orphans;
 
 # $compose is the per-run docker-compose invocation prefix: plain for
 # sequential runs, or carrying -p <project> (+ a port-override -f file) so
@@ -33,22 +32,22 @@ my %SUITES = (
     sanity => sub {
         my ($compose) = @_;
         my @t = (glob('t/*.t'), glob('extensions/*/t/*.t'));
-        return [@$compose, 'run', ($remove_orphans ? '--remove-orphans' : ()), qw(--no-deps bmo.test test_sanity), @t];
+        return [@$compose, 'run', qw(--no-deps bmo.test test_sanity), @t];
     },
     bmo => sub {
         my ($compose) = @_;
         my @t = (glob('t/bmo/*.t'), glob('extensions/*/t/bmo/*.t'));
-        return [@$compose, 'run', ($remove_orphans ? '--remove-orphans' : ()), qw(-e CI=1 bmo.test test_bmo -q -f), @t];
+        return [@$compose, 'run', qw(-e CI=1 bmo.test test_bmo -q -f), @t];
     },
     webservices => sub {
         my ($compose) = @_;
-        return [@$compose, 'run', ($remove_orphans ? '--remove-orphans' : ()), qw(bmo.test test_webservices)];
+        return [@$compose, 'run', qw(bmo.test test_webservices)];
     },
     (map {
         my $n = $_;
         ("selenium$n" => sub {
             my ($compose) = @_;
-            return [@$compose, 'run', ($remove_orphans ? '--remove-orphans' : ()), '-e', "SELENIUM_GROUP=$n", 'bmo.test', 'test_selenium'];
+            return [@$compose, 'run', '-e', "SELENIUM_GROUP=$n", 'bmo.test', 'test_selenium'];
         })
     } 1 .. 4),
 );
@@ -64,7 +63,6 @@ GetOptions(
     'help'            => \$help,
     'usage'           => \$usage,
     'version'         => \$version,
-    'remove-orphans'  => \$remove_orphans,
 ) or pod2usage(2);
 $jobs = 1 if $jobs < 1;
 
@@ -200,7 +198,7 @@ my $cleanup_all = sub {
         # started, so `kill` (targets the containers directly) has to run
         # before `down -v`, or a killed-mid-test container is left running.
         system(@$compose, 'kill');
-        system(@$compose, 'down', '-v', ($remove_orphans ? '--remove-orphans' : ()));
+        system(@$compose, 'down', '-v', '--remove-orphans');
         last if $jobs <= 1; # single shared project, one down is enough
     }
 };
@@ -211,7 +209,12 @@ while (1) {
     while (@queue && keys(%running) < $jobs) {
         my $s = shift @queue;
         my $compose  = compose_for($jobs > 1 ? (project => "bmo_test_$s", override => $override) : ());
-        my $down_cmd = [@$compose, 'down', '-v', ($remove_orphans ? '--remove-orphans' : ())];
+        # --remove-orphans: a `run` one-off container left behind by an
+        # interrupted or ad hoc invocation holds onto the same named volumes
+        # (mysql-db, data-dir, ...) as the next "fresh" run, leaking DB/schema
+        # state across runs (e.g. "Table already exists: bz_schema") until
+        # something cleans it.
+        my $down_cmd = [@$compose, 'down', '-v', '--remove-orphans'];
         my $run_cmd  = $SUITES{$s}->($compose);
 
         my $pid = fork;
@@ -284,12 +287,15 @@ bmo_run_tests.pl - run BMO's docker-based test suites with a colored summary
 
 =head1 SYNOPSIS
 
-bmo_run_tests.pl [--build] [--jobs N] [--remove-orphans] [--list] [--help] [--usage] [--version] [suite ...] [dir]
+bmo_run_tests.pl [--build] [--jobs N] [--list] [--help] [--usage] [--version] [suite ...] [dir]
 
 =head1 DESCRIPTION
 
 Runs BMO's docker-compose test suites (sanity, unit, webservices, selenium
-x4), each preceded by C<docker compose down -v>. Each suite's docker output
+x4), each preceded by C<docker compose down -v --remove-orphans> (leftover
+one-off C<run> containers from an earlier interrupted or ad hoc invocation
+hold onto the same named volumes as the next "fresh" run, leaking DB/schema
+state across runs otherwise). Each suite's docker output
 goes to its own log file rather than the terminal; the terminal instead
 shows a live-updating status table (SUITE / STATUS / TIME / that suite's
 log path), with an animated hourglass for suites still queued and an
@@ -331,12 +337,6 @@ Run C<docker compose build> before running the selected suites.
 Run up to N suites concurrently, each isolated in its own compose project.
 Defaults to 1 (one suite at a time).
 
-=item --remove-orphans
-
-Pass C<--remove-orphans> to every C<docker compose down>/C<run> call, to
-clean up containers left behind by services removed or renamed since the
-compose file last changed.
-
 =item --list
 
 Print the known suite names, one per line, and exit.
@@ -373,7 +373,7 @@ found under C<BMO_DIR>.
 
 =head1 VERSION
 
-1.3.1
+1.3.2
 
 =head1 AUTHOR
 
