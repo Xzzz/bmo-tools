@@ -168,7 +168,7 @@ Runs BMO's docker-based test suites (sanity, unit, webservices, selenium ×4).
 Each suite's docker output goes to its own log file; the terminal shows a
 live-updating status table instead (SUITE / STATUS / TIME / that suite's
 log path), with an animated hourglass for suites still queued and a
-spinner for suites currently running.
+spinner for the suite currently running.
 
 ### Usage
 
@@ -178,8 +178,7 @@ cd /path/to/bmo
 bmo_run_tests.pl                 # run all suites
 bmo_run_tests.pl sanity bmo      # run only the named suites
 bmo_run_tests.pl sanity /path/to/bmo   # run in a specific checkout
-bmo_run_tests.pl --build         # docker compose build first, then run all
-bmo_run_tests.pl --jobs 4        # run up to 4 suites concurrently
+bmo_run_tests.pl --build         # docker compose build first (pruning old dangling images), then run all
 bmo_run_tests.pl --list          # list suite names and exit
 bmo_run_tests.pl --usage         # one-line usage and exit
 bmo_run_tests.pl --help          # full help (man page) and exit
@@ -198,18 +197,14 @@ checkout directory (overriding `BMO_DIR`).
 | `webservices` | `test_webservices` |
 | `selenium1`..`selenium4` | `test_selenium` with `SELENIUM_GROUP=1..4` |
 
-Each suite runs `docker compose down -v --remove-orphans` before it starts,
-to reset state - including any leftover one-off `run` container from an
+Each suite runs `docker compose down -v --remove-orphans` before it starts
+and again once it finishes, to reset state and leave nothing running -
+including any leftover one-off `run` container from an
 earlier interrupted or ad hoc invocation, which would otherwise hold onto
 the same named volumes as the next "fresh" run and leak DB/schema state
 across runs.
 
-With `--jobs`/`-j`, up to that many suites run concurrently instead of one
-at a time. Each gets its own compose project (its own DB, memcached, etc.),
-and the fixed host ports in `docker-compose.test.yml` are overridden to
-Docker-assigned free ones, so concurrent suites can't collide.
-
-`^C` stops any running and queued suites and cleans up their docker
+`^C` stops the running suite, skips the queued ones, and cleans up the docker
 containers, networks, and volumes before exiting. A second `^C` exits
 immediately without cleaning up.
 
