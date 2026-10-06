@@ -13,41 +13,28 @@ use Pod::Usage qw(pod2usage);
 use Term::ANSIColor qw(colored);
 use Time::HiRes qw(time);
 
-use constant VERSION => '1.3.2';
+use constant VERSION => '2.0.0';
 
 my $BMO_DIR = $ENV{BMO_DIR} // '.';
 
-# $compose is the per-run docker-compose invocation prefix: plain for
-# sequential runs, or carrying -p <project> (+ a port-override -f file) so
-# parallel suites don't collide on container names, the DB, or host ports.
-sub compose_for {
-    my (%opt) = @_;
-    my @c = ('docker', 'compose', '-f', 'docker-compose.test.yml');
-    push @c, '-f', $opt{override} if $opt{override};
-    push @c, '-p', $opt{project} if $opt{project};
-    return \@c;
-}
+my @COMPOSE = ('docker', 'compose', '-f', 'docker-compose.test.yml');
 
 my %SUITES = (
     sanity => sub {
-        my ($compose) = @_;
         my @t = (glob('t/*.t'), glob('extensions/*/t/*.t'));
-        return [@$compose, 'run', qw(--no-deps bmo.test test_sanity), @t];
+        return [@COMPOSE, 'run', qw(--no-deps bmo.test test_sanity), @t];
     },
     bmo => sub {
-        my ($compose) = @_;
         my @t = (glob('t/bmo/*.t'), glob('extensions/*/t/bmo/*.t'));
-        return [@$compose, 'run', qw(-e CI=1 bmo.test test_bmo -q -f), @t];
+        return [@COMPOSE, 'run', qw(-e CI=1 bmo.test test_bmo -q -f), @t];
     },
     webservices => sub {
-        my ($compose) = @_;
-        return [@$compose, 'run', qw(bmo.test test_webservices)];
+        return [@COMPOSE, 'run', qw(bmo.test test_webservices)];
     },
     (map {
         my $n = $_;
         ("selenium$n" => sub {
-            my ($compose) = @_;
-            return [@$compose, 'run', '-e', "SELENIUM_GROUP=$n", 'bmo.test', 'test_selenium'];
+            return [@COMPOSE, 'run', '-e', "SELENIUM_GROUP=$n", 'bmo.test', 'test_selenium'];
         })
     } 1 .. 4),
 );
@@ -55,16 +42,13 @@ my %SUITES = (
 my @ORDER = qw(sanity bmo webservices selenium1 selenium2 selenium3 selenium4);
 
 my ($build, $list, $help, $usage, $version);
-my $jobs = 1;
 GetOptions(
     'build'           => \$build,
-    'jobs|j=i'        => \$jobs,
     'list'            => \$list,
     'help'            => \$help,
     'usage'           => \$usage,
     'version'         => \$version,
 ) or pod2usage(2);
-$jobs = 1 if $jobs < 1;
 
 pod2usage(-exitval => 0, -verbose => 1) if $usage;
 pod2usage(-exitval => 0, -verbose => 2) if $help;
@@ -100,35 +84,15 @@ if ($build) {
     say colored('==> building test image', 'bold'), " ($buildlog)";
     system("docker compose -f docker-compose.test.yml build >'$buildlog' 2>&1") == 0
         or die "build failed, see $buildlog\n";
-}
-
-my $override;
-if ($jobs > 1) {
-    # Each parallel suite gets its own compose project (own bmo.db, memcached,
-    # etc.) so runs can't stomp on each other's DB state or container names.
-    # externalapi.test/bq bind fixed host ports in docker-compose.test.yml, so
-    # an override file drops those bindings to let Docker pick free ones.
-    $override = "$logdir/port-override.yml";
-    open(my $ofh, '>', $override) or die "$override: $!\n";
-    # ports: needs the !override tag: Compose concatenates ports: lists
-    # across -f files by default, so a plain list here would leave the
-    # original fixed host-port binding in place alongside the new one.
-    print $ofh <<'YAML';
-services:
-  externalapi.test:
-    ports: !override
-      - "8001"
-  bq:
-    ports: !override
-      - "9050"
-YAML
-    close $ofh;
+    # Each rebuild untags the previous bmo.test/externalapi.test images
+    # (~1.5GB apiece) without deleting them; drop those dangling leftovers.
+    system("docker image prune -f --filter label=com.docker.compose.project >>'$buildlog' 2>&1");
 }
 
 my %status  = map { $_ => 'waiting' } @suites;
 my %logpath = map { $_ => "$logdir/$_.log" } @suites;
 my %dur;
-my %running; # pid => suite name
+my ($pid, $cur); # the suite in progress, if any
 my @queue = @suites;
 
 END { print "\e[?25h" } # always restore the cursor, even on die/^C
@@ -180,7 +144,7 @@ my $draw = sub {
     $drawn = 1;
 };
 
-# Each forked runner gets its own process group (below), so a ^C at the
+# The forked runner gets its own process group (below), so a ^C at the
 # terminal does NOT reach it or its docker grandchild automatically; we
 # decide what to kill explicitly, once, from here. Otherwise a suite mid
 # "down" would swallow the signal and immediately barrel into "run" anyway.
@@ -190,37 +154,26 @@ $SIG{INT} = $SIG{TERM} = sub {
     $interrupted = 1;
 };
 
-my $cleanup_all = sub {
-    for my $s (@suites) {
-        my $compose = compose_for($jobs > 1 ? (project => "bmo_test_$s", override => $override) : ());
-        # `run` containers are one-offs: killing the runner's process group
-        # above stops docker-compose itself but not a container it already
-        # started, so `kill` (targets the containers directly) has to run
-        # before `down -v`, or a killed-mid-test container is left running.
-        system(@$compose, 'kill');
-        system(@$compose, 'down', '-v', '--remove-orphans');
-        last if $jobs <= 1; # single shared project, one down is enough
-    }
-};
-
 print "\n\e[?25l"; # blank line, then hide cursor
 while (1) {
     last if $interrupted;
-    while (@queue && keys(%running) < $jobs) {
+    if (!$pid && @queue) {
         my $s = shift @queue;
-        my $compose  = compose_for($jobs > 1 ? (project => "bmo_test_$s", override => $override) : ());
         # --remove-orphans: a `run` one-off container left behind by an
         # interrupted or ad hoc invocation holds onto the same named volumes
         # (mysql-db, data-dir, ...) as the next "fresh" run, leaking DB/schema
         # state across runs (e.g. "Table already exists: bz_schema") until
         # something cleans it.
-        my $down_cmd = [@$compose, 'down', '-v', '--remove-orphans'];
-        my $run_cmd  = $SUITES{$s}->($compose);
+        my $down_cmd = [@COMPOSE, 'down', '-v', '--remove-orphans'];
+        my $run_cmd  = $SUITES{$s}->();
 
-        my $pid = fork;
+        $pid = fork;
         die "fork: $!\n" unless defined $pid;
         if ($pid == 0) {
-            setpgid(0, 0); # own group, so it's only ever killed via $running above
+            setpgid(0, 0); # own group, so it's only ever killed explicitly on ^C
+            # Not the parent's flag-setting handler: on ^C this runner must die
+            # right away instead of carrying on into the next step.
+            $SIG{INT} = $SIG{TERM} = 'DEFAULT';
             # docker compose still sees an inherited stdin fd pointing at the
             # real tty and, being in a background group now, gets suspended
             # (SIGTTIN/SIGTTOU) the moment it does any tty job-control, even
@@ -236,15 +189,18 @@ while (1) {
             open(my $rf, '>', "$logdir/$s.result") or die "$!\n";
             print $rf(($rc == 0 ? 1 : 0), "\t", $sdur);
             close $rf;
+            # Result is already recorded, so this teardown is not counted in the
+            # suite time; without it the stack (and its volumes) stays up.
+            system(@$down_cmd);
             _exit(0); # skip END blocks (cursor-restore) meant for the parent
         }
-        $running{$pid} = $s;
+        $cur = $s;
         $status{$s} = 'running';
     }
 
-    for my $pid (keys %running) {
-        next unless waitpid($pid, WNOHANG) == $pid;
-        my $s = delete $running{$pid};
+    if ($pid && waitpid($pid, WNOHANG) == $pid) {
+        my $s = $cur;
+        undef $pid;
         my ($ok, $sdur) = (0, 0);
         if (open(my $rf, '<', "$logdir/$s.result")) {
             ($ok, $sdur) = split /\t/, <$rf>;
@@ -255,21 +211,23 @@ while (1) {
     }
 
     $draw->();
-    last if !@queue && !%running;
+    last if !@queue && !$pid;
     select(undef, undef, undef, 0.15);
     $frame++;
 }
 
 if ($interrupted) {
-    say colored('==> stopping running suites and cleaning up...', 'bold');
-    kill('TERM', map { -$_ } keys %running) if %running;
-    while (%running) {
-        for my $pid (keys %running) {
-            delete $running{$pid} if waitpid($pid, WNOHANG) == $pid;
-        }
-        select(undef, undef, undef, 0.1);
+    say colored('==> stopping and cleaning up...', 'bold');
+    if ($pid) {
+        kill('TERM', -$pid);
+        waitpid($pid, 0);
     }
-    $cleanup_all->();
+    # `run` containers are one-offs: killing the runner's process group
+    # above stops docker-compose itself but not a container it already
+    # started, so `kill` (targets the containers directly) has to run
+    # before `down -v`, or a killed-mid-test container is left running.
+    system(@COMPOSE, 'kill');
+    system(@COMPOSE, 'down', '-v', '--remove-orphans');
     print "\e[?25h"; # show cursor
     exit 130;
 }
@@ -287,27 +245,22 @@ bmo_run_tests.pl - run BMO's docker-based test suites with a colored summary
 
 =head1 SYNOPSIS
 
-bmo_run_tests.pl [--build] [--jobs N] [--list] [--help] [--usage] [--version] [suite ...] [dir]
+bmo_run_tests.pl [--build] [--list] [--help] [--usage] [--version] [suite ...] [dir]
 
 =head1 DESCRIPTION
 
 Runs BMO's docker-compose test suites (sanity, unit, webservices, selenium
-x4), each preceded by C<docker compose down -v --remove-orphans> (leftover
+x4), each preceded and followed by C<docker compose down -v --remove-orphans> (leftover
 one-off C<run> containers from an earlier interrupted or ad hoc invocation
 hold onto the same named volumes as the next "fresh" run, leaking DB/schema
 state across runs otherwise). Each suite's docker output
 goes to its own log file rather than the terminal; the terminal instead
 shows a live-updating status table (SUITE / STATUS / TIME / that suite's
 log path), with an animated hourglass for suites still queued and an
-animated spinner for suites currently running.
+animated spinner for the suite currently running.
 Exits non-zero if any suite failed.
 
-With C<--jobs>, up to that many suites run concurrently instead of one at a
-time, each under its own compose project (its own DB, memcached, etc.) so
-they can't interfere with each other, and with the fixed host ports in
-C<docker-compose.test.yml> replaced by Docker-assigned free ones.
-
-C<^C> stops any running and queued suites and cleans up their docker
+C<^C> stops the running suite, skips the queued ones, and cleans up the docker
 containers, networks, and volumes before exiting. A second C<^C> exits
 immediately without cleaning up.
 
@@ -330,12 +283,8 @@ With no suite arguments, all suites run in the order above.
 
 =item --build
 
-Run C<docker compose build> before running the selected suites.
-
-=item --jobs N, -j N
-
-Run up to N suites concurrently, each isolated in its own compose project.
-Defaults to 1 (one suite at a time).
+Run C<docker compose build> before running the selected suites. Afterwards the
+dangling images left behind by earlier compose builds are pruned.
 
 =item --list
 
@@ -373,7 +322,7 @@ found under C<BMO_DIR>.
 
 =head1 VERSION
 
-1.3.2
+2.0.0
 
 =head1 AUTHOR
 
